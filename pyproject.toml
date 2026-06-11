@@ -1,0 +1,18 @@
+[project]
+name = "voxt-qwen3-asr"
+version = "0.1.0"
+description = "Local OpenAI-compatible Qwen3-ASR server for VoxT"
+requires-python = ">=3.10"
+dependencies = [
+  "huggingface_hub>=1.0",
+  "mlx-qwen3-asr[serve]>=0.3.5",
+  "uvicorn>=0.20.0",
+  "websockets>=12.0",
+]
+
+[project.scripts]
+voxt-qwen3-asr = "voxt_qwen3_asr.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

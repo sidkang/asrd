@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.sid.voxt-qwen3-asr</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/Users/sid/.local/share/mise/venv/asr/bin/python</string>
+      <string>/Users/sid/Developer/qwen3-asr/start_voxt_asr_server.py</string>
+      <string>--host</string>
+      <string>0.0.0.0</string>
+      <string>--port</string>
+      <string>5100</string>
+      <string>--unload-after-sec</string>
+      <string>30</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/sid/Developer/qwen3-asr</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/sid/Library/Logs/com.sid.voxt-qwen3-asr.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/sid/Library/Logs/com.sid.voxt-qwen3-asr.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>PATH</key>
+      <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+  </dict>
+</plist>
