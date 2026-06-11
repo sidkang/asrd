@@ -5,7 +5,7 @@ Local OpenAI-compatible ASR server for VoxT on Apple Silicon/MLX, powered by `ml
 ## Run
 
 ```bash
-uv run voxt-qwen3-asr
+uv run start_voxt_asr_server.py
 ```
 
 Defaults:
@@ -18,7 +18,7 @@ Defaults:
 - preview model: `mlx-community/Qwen3-ASR-0.6B-4bit`
 - model cache: `./.cache`
 - Hugging Face endpoint: `https://hf-mirror.com`
-- idle unload: `60s`
+- idle unload: `30s`
 
 ## VoxT settings
 
@@ -51,7 +51,8 @@ For LAN use, replace `127.0.0.1` with the server machine IP.
 - Realtime WebSocket streams use the final model in-process and accept VoxT Aliyun Qwen realtime model names such as `qwen3-asr-flash-realtime`.
 - ASR runs in a worker process, loaded lazily on first use.
 - Realtime ASR uses a separate lazily-loaded in-process session.
-- The worker process exits after 60 seconds idle by default.
+- Preview uploads transcribe only the last 30 seconds by default.
+- The worker process exits after 30 seconds idle by default.
 - Requests are serialized to avoid MLX thread/stream issues.
 - Busy preview requests are skipped with an empty result to avoid backlog.
 - Logs include speed and RTF, for example `speed=14.11x rtf=0.071`.
@@ -60,23 +61,23 @@ For LAN use, replace `127.0.0.1` with the server machine IP.
 
 ```bash
 # keep models loaded
-uv run voxt-qwen3-asr --unload-after-sec 0
+uv run start_voxt_asr_server.py --unload-after-sec 0
 
 # unload sooner/later
-uv run voxt-qwen3-asr --unload-after-sec 120
+uv run start_voxt_asr_server.py --unload-after-sec 120
 
 # use one model for both preview and final
-uv run voxt-qwen3-asr \
+uv run start_voxt_asr_server.py \
   --model mlx-community/Qwen3-ASR-1.7B-6bit \
   --preview-model mlx-community/Qwen3-ASR-1.7B-6bit
 
 # faster preview
-uv run voxt-qwen3-asr \
+uv run start_voxt_asr_server.py \
   --preview-model mlx-community/Qwen3-ASR-0.6B-4bit \
   --preview-max-new-tokens 64
 
 # use official Hugging Face instead of mirror
-HF_ENDPOINT=https://huggingface.co uv run voxt-qwen3-asr
+HF_ENDPOINT=https://huggingface.co uv run start_voxt_asr_server.py
 ```
 
 ## Health check

@@ -892,7 +892,7 @@ wheels = [
 [[package]]
 name = "voxt-qwen3-asr"
 version = "0.1.0"
-source = { editable = "." }
+source = { virtual = "." }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "mlx-qwen3-asr", extra = ["serve"] },
