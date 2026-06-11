@@ -9,7 +9,7 @@
     <key>ProgramArguments</key>
     <array>
       <string>/Users/sid/.local/share/mise/venv/asr/bin/python</string>
-      <string>/Users/sid/Developer/qwen3-asr/start_voxt_asr_server.py</string>
+      <string>/Users/sid/Developer/qwen3-asr/qwen3_asr_server.py</string>
       <string>--host</string>
       <string>0.0.0.0</string>
       <string>--port</string>

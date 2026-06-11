@@ -18,7 +18,7 @@ powered by `mlx-qwen3-asr`.
 ## Run
 
 ```bash
-uv run start_voxt_asr_server.py
+uv run qwen3_asr_server.py
 ```
 
 Defaults:
@@ -68,10 +68,10 @@ For LAN use, replace `127.0.0.1` with the server machine IP.
 Useful commands:
 
 ```bash
-uv run start_voxt_asr_server.py --readme
-uv run start_voxt_asr_server.py --unload-after-sec 0
-uv run start_voxt_asr_server.py --preview-max-new-tokens 64
-HF_ENDPOINT=https://huggingface.co uv run start_voxt_asr_server.py
+uv run qwen3_asr_server.py --readme
+uv run qwen3_asr_server.py --unload-after-sec 0
+uv run qwen3_asr_server.py --preview-max-new-tokens 64
+HF_ENDPOINT=https://huggingface.co uv run qwen3_asr_server.py
 ```
 """
 

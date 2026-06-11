@@ -5,7 +5,7 @@ Local OpenAI-compatible ASR server for VoxT on Apple Silicon/MLX, powered by `ml
 ## Run
 
 ```bash
-uv run start_voxt_asr_server.py
+uv run qwen3_asr_server.py
 ```
 
 Defaults:
@@ -61,23 +61,23 @@ For LAN use, replace `127.0.0.1` with the server machine IP.
 
 ```bash
 # keep models loaded
-uv run start_voxt_asr_server.py --unload-after-sec 0
+uv run qwen3_asr_server.py --unload-after-sec 0
 
 # unload sooner/later
-uv run start_voxt_asr_server.py --unload-after-sec 120
+uv run qwen3_asr_server.py --unload-after-sec 120
 
 # use one model for both preview and final
-uv run start_voxt_asr_server.py \
+uv run qwen3_asr_server.py \
   --model mlx-community/Qwen3-ASR-1.7B-6bit \
   --preview-model mlx-community/Qwen3-ASR-1.7B-6bit
 
 # faster preview
-uv run start_voxt_asr_server.py \
+uv run qwen3_asr_server.py \
   --preview-model mlx-community/Qwen3-ASR-0.6B-4bit \
   --preview-max-new-tokens 64
 
 # use official Hugging Face instead of mirror
-HF_ENDPOINT=https://huggingface.co uv run start_voxt_asr_server.py
+HF_ENDPOINT=https://huggingface.co uv run qwen3_asr_server.py
 ```
 
 ## Health check
