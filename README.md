@@ -80,6 +80,26 @@ uv run qwen3_asr_server.py \
 HF_ENDPOINT=https://huggingface.co uv run qwen3_asr_server.py
 ```
 
+## VoxT-style LLM reference API
+
+`voxt_llm_reference.py` is an independent reference API for VoxT's three ASR → LLM chains:
+
+- transcription enhancement
+- translation
+- rewrite
+
+It keeps VoxT-like default prompts and exposes the compiled prompt/messages for comparison tests.
+
+```bash
+uv run voxt_llm_reference.py --port 5112
+
+curl http://127.0.0.1:5112/v1/voxt/transcription \
+  -H 'content-type: application/json' \
+  -d '{"text":"um hello world","dry_run":true}'
+```
+
+Set `upstream_url`, `upstream_api_key`, and `model` in the request body to call an OpenAI-compatible LLM.
+
 ## Health check
 
 ```bash
