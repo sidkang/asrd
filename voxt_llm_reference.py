@@ -111,41 +111,22 @@ class Delivery(str, Enum):
     user_message = "user_message"
 
 
-class ThinkingMode(str, Enum):
-    provider_default = "provider_default"
-    off = "off"
-    on = "on"
-    effort = "effort"
-    budget = "budget"
+class VoxtLLMProvider(str, Enum):
+    # Only providers with VoxT-specific runtime tuning are represented here.
+    # Everything else uses VoxT's default remote-LLM tuning.
+    default = "default"
+    volcengine = "volcengine"
+    zai = "zai"
+    deepseek = "deepseek"
 
 
-class ThinkingSettings(BaseModel):
-    mode: ThinkingMode = ThinkingMode.provider_default
-    effort: str | None = None
-    budget_tokens: int | None = None
-    expose_reasoning: bool = False
-
-
-class GenerationSettings(BaseModel):
-    # Mirrors VoxT's LLMGenerationSettings. The OpenAI-compatible request builder
-    # passes through common fields and preserves unsupported/experimental values
-    # in extra_body.
-    max_output_tokens: int | None = None
+class VoxtRuntimeTuning(BaseModel):
+    # These are the parameters VoxT itself sets in RemoteLLMRuntimeClient:
+    # max_tokens is estimated from input/prompt sizes, and temperature/top_p are
+    # provider-specific. Leave fields unset to use the VoxT-derived defaults.
+    max_tokens: int | None = None
     temperature: float | None = None
     top_p: float | None = None
-    top_k: int | None = None
-    min_p: float | None = None
-    seed: int | None = None
-    stop: list[str] = Field(default_factory=list)
-    presence_penalty: float | None = None
-    frequency_penalty: float | None = None
-    repetition_penalty: float | None = None
-    logprobs: bool = False
-    top_logprobs: int | None = None
-    response_format: Literal["plain", "json", "json_schema"] = "plain"
-    thinking: ThinkingSettings = Field(default_factory=ThinkingSettings)
-    extra_body: dict[str, Any] = Field(default_factory=dict)
-    extra_options: dict[str, Any] = Field(default_factory=dict)
 
 
 class BasePipelineRequest(BaseModel):
@@ -153,11 +134,12 @@ class BasePipelineRequest(BaseModel):
     upstream_url: str | None = None
     upstream_api_key: str | None = None
     dry_run: bool = False
+    provider: VoxtLLMProvider = VoxtLLMProvider.default
     delivery: Delivery = Delivery.system_prompt
     user_main_language: str = "Chinese"
     dictionary_glossary: str = ""
     prompt_template: str | None = None
-    generation: GenerationSettings = Field(default_factory=GenerationSettings)
+    tuning: VoxtRuntimeTuning = Field(default_factory=VoxtRuntimeTuning)
 
 
 class EnhancementRequest(BasePipelineRequest):
@@ -271,50 +253,67 @@ def compile_request(task: str, req: BasePipelineRequest, prompt_content: str, **
         messages.append({"role": "system", "content": instructions})
     messages.append({"role": "user", "content": prompt})
 
-    payload = build_openai_payload(req, messages)
+    payload = build_openai_payload(req, task, messages, instructions, prompt, task_data)
     return CompiledRequest(task=task, instructions=instructions, prompt=prompt, messages=messages, openai_payload=payload)
 
 
-def build_openai_payload(req: BasePipelineRequest, messages: list[dict[str, str]]) -> dict[str, Any]:
+def build_openai_payload(
+    req: BasePipelineRequest,
+    task: str,
+    messages: list[dict[str, str]],
+    instructions: str,
+    prompt: str,
+    task_data: dict[str, Any],
+) -> dict[str, Any]:
     model = req.model or DEFAULT_MODEL
     if not model:
         model = "local-model"
-    g = req.generation
+    tuning = voxt_runtime_tuning(req, task, instructions, prompt, task_data)
     payload: dict[str, Any] = {"model": model, "messages": messages}
-    if g.max_output_tokens is not None:
-        payload["max_tokens"] = g.max_output_tokens
-    if g.temperature is not None:
-        payload["temperature"] = g.temperature
-    if g.top_p is not None:
-        payload["top_p"] = g.top_p
-    if g.stop:
-        payload["stop"] = g.stop
-    if g.presence_penalty is not None:
-        payload["presence_penalty"] = g.presence_penalty
-    if g.frequency_penalty is not None:
-        payload["frequency_penalty"] = g.frequency_penalty
-    if g.seed is not None:
-        payload["seed"] = g.seed
-    if g.logprobs:
-        payload["logprobs"] = True
-    if g.top_logprobs is not None:
-        payload["top_logprobs"] = g.top_logprobs
-    if g.response_format == "json":
+    payload["max_tokens"] = tuning.max_tokens
+    payload["temperature"] = tuning.temperature
+    payload["top_p"] = tuning.top_p
+    if isinstance(req, RewriteRequest) and req.structured_answer_output and req.provider == VoxtLLMProvider.deepseek:
         payload["response_format"] = {"type": "json_object"}
-    elif g.response_format == "json_schema":
-        payload["response_format"] = {"type": "json_schema"}
-    if g.top_k is not None:
-        payload.setdefault("extra_body", {})["top_k"] = g.top_k
-    if g.min_p is not None:
-        payload.setdefault("extra_body", {})["min_p"] = g.min_p
-    if g.repetition_penalty is not None:
-        payload.setdefault("extra_body", {})["repetition_penalty"] = g.repetition_penalty
-    if g.thinking.mode != ThinkingMode.provider_default:
-        payload.setdefault("extra_body", {})["thinking"] = g.thinking.model_dump(mode="json")
-    if g.extra_options:
-        payload.setdefault("extra_body", {})["options"] = g.extra_options
-    payload.update(g.extra_body)
     return payload
+
+
+def voxt_runtime_tuning(
+    req: BasePipelineRequest,
+    task: str,
+    instructions: str,
+    prompt: str,
+    task_data: dict[str, Any],
+) -> VoxtRuntimeTuning:
+    max_tokens = req.tuning.max_tokens or estimated_voxt_output_budget(task, instructions, prompt, task_data)
+    if req.provider == VoxtLLMProvider.volcengine:
+        default_temperature, default_top_p = 0.1, 0.3
+    elif req.provider == VoxtLLMProvider.zai:
+        default_temperature, default_top_p = 0.2, 0.7
+    else:
+        default_temperature, default_top_p = 0.2, 0.9
+    return VoxtRuntimeTuning(
+        max_tokens=max_tokens,
+        temperature=req.tuning.temperature if req.tuning.temperature is not None else default_temperature,
+        top_p=req.tuning.top_p if req.tuning.top_p is not None else default_top_p,
+    )
+
+
+def estimated_voxt_output_budget(task: str, instructions: str, prompt: str, task_data: dict[str, Any]) -> int:
+    # VoxT estimates an output budget from input/prompt size. This is a compact
+    # approximation for reference testing, not an exact token counter.
+    if task == "enhancement":
+        primary_chars = len(str(task_data.get("text") or ""))
+        multiplier = 1.10
+    elif task == "translation":
+        primary_chars = len(str(task_data.get("text") or ""))
+        multiplier = 1.35
+    else:
+        primary_chars = len(str(task_data.get("dictated_prompt") or "")) + len(str(task_data.get("source_text") or ""))
+        multiplier = 1.35
+    content_budget = int(max(1, primary_chars) * multiplier + 0.999)
+    prompt_overhead = max(64, int((len(instructions) + len(prompt)) / 12))
+    return max(256, min(32768, content_budget + prompt_overhead))
 
 
 def extract_text(data: Any) -> str:

@@ -88,7 +88,7 @@ HF_ENDPOINT=https://huggingface.co uv run qwen3_asr_server.py
 - translation
 - rewrite
 
-It keeps VoxT-like default prompts and exposes the compiled prompt/messages for comparison tests.
+It keeps VoxT-like default prompts and only includes LLM runtime fields VoxT sets itself for these chains: `max_tokens`, `temperature`, `top_p`, plus DeepSeek JSON response format for structured rewrite.
 
 ```bash
 uv run voxt_llm_reference.py --port 5112
