@@ -90,7 +90,7 @@ HF_ENDPOINT=https://huggingface.co uv run qwen3_asr_server.py
 - translation
 - rewrite
 
-It keeps VoxT-like default prompts and only includes LLM runtime fields VoxT sets itself for these chains: `max_tokens`, `temperature`, `top_p`, plus DeepSeek JSON response format for structured rewrite.
+It keeps VoxT-like default prompts and only includes LLM runtime fields VoxT sets itself for these chains: `max_tokens`, `temperature`, `top_p`, plus DeepSeek JSON response format for structured rewrite. It also includes reference implementations for ASR hint compilation, visible-output cleanup, structured rewrite parsing, and long-text segmentation.
 
 ```bash
 uv run voxt_llm_reference.py --port 5112
@@ -111,6 +111,25 @@ curl http://127.0.0.1:5112/v1/voxt/whisper/transcribe \
 curl http://127.0.0.1:5112/v1/voxt/whisper/chunk \
   -F file=@sample.wav
 ```
+
+ASR hint compilation:
+
+```bash
+curl http://127.0.0.1:5112/v1/voxt/asr-hint/compile \
+  -H 'content-type: application/json' \
+  -d '{"target":"openai_whisper","user_main_language":"Chinese","user_other_languages":["English","Japanese"],"dictionary_terms":"VoxT\nQwen3-ASR"}'
+```
+
+Supported Jinja variables:
+
+```txt
+{{USER_MAIN_LANGUAGE}}
+{{USER_OTHER_LANGUAGES}}
+{{TARGET_LANGUAGE}}
+{{DICTIONARY_TERMS}}
+```
+
+`dictionary_terms` feeds `{{DICTIONARY_TERMS}}`; `dictionary_glossary` is added as a separate LLM context block. Long inputs are segmented by default after 300 characters.
 
 Set `upstream_url`, `upstream_api_key`, and `model` in the request body to call an OpenAI-compatible LLM. Set multipart fields `endpoint`, `api_key`, and `model` to override the Whisper/OpenAI ASR target.
 
