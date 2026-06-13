@@ -82,8 +82,10 @@ HF_ENDPOINT=https://huggingface.co uv run qwen3_asr_server.py
 
 ## VoxT-style LLM reference API
 
-`voxt_llm_reference.py` is an independent reference API for VoxT's three ASR → LLM chains:
+`voxt_llm_reference.py` is an independent reference API for VoxT-style ASR and ASR → LLM chains:
 
+- Whisper/OpenAI final transcription call
+- Whisper/OpenAI chunk preview call
 - transcription enhancement
 - translation
 - rewrite
@@ -98,7 +100,19 @@ curl http://127.0.0.1:5112/v1/voxt/transcription \
   -d '{"text":"um hello world","dry_run":true}'
 ```
 
-Set `upstream_url`, `upstream_api_key`, and `model` in the request body to call an OpenAI-compatible LLM.
+Reference Whisper/OpenAI calls:
+
+```bash
+# final transcription-style call
+curl http://127.0.0.1:5112/v1/voxt/whisper/transcribe \
+  -F file=@sample.wav
+
+# VoxT chunk pseudo-realtime preview-style call
+curl http://127.0.0.1:5112/v1/voxt/whisper/chunk \
+  -F file=@sample.wav
+```
+
+Set `upstream_url`, `upstream_api_key`, and `model` in the request body to call an OpenAI-compatible LLM. Set multipart fields `endpoint`, `api_key`, and `model` to override the Whisper/OpenAI ASR target.
 
 ## Health check
 
