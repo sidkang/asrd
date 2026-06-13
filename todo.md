@@ -13,10 +13,12 @@ prompt_chars=0
 
 后续可考虑：服务端增加默认 prompt，只在请求未传 prompt 时使用。
 
-建议内容：
+使用 Voxt 源码里的原句风格：
 
 ```txt
-Chinese, English, and Japanese may appear. Transcribe exactly as spoken. Do not translate. Preserve mixed-language content, names, terms, and code-like text.
+Primary language: {{USER_MAIN_LANGUAGE}}
+Other frequently used languages: {{USER_OTHER_LANGUAGES}}
+Mixed-language speech may appear. Preserve names, brands, URLs, and code-like text exactly as spoken.
 ```
 
 实现要点：
