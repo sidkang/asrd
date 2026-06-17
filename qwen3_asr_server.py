@@ -192,8 +192,6 @@ class PreviewStreamSession:
     language: str | None
     prompt: str
     max_new_tokens: int | None
-    last_used_at: float
-    reset_count: int = 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1117,6 +1115,15 @@ def worker_main(config: Config, request_queue: mp.Queue, response_queue: mp.Queu
             return False
         return float(np.mean(np.abs(reference[:count] - candidate[:count]))) <= threshold
 
+    def preview_stream_response(stream: PreviewStreamSession, *, delta_samples: int, total_samples: int) -> dict[str, Any]:
+        return {
+            "text": stream.last_text,
+            "preview_streaming": True,
+            "preview_delta_samples": int(delta_samples),
+            "preview_total_samples": int(total_samples),
+            "preview_stream_chars": len(stream.last_text),
+        }
+
     def handle_preview_message(message: dict[str, Any]) -> dict[str, Any]:
         nonlocal preview_stream
         sample_rate = 16000
@@ -1150,14 +1157,7 @@ def worker_main(config: Config, request_queue: mp.Queue, response_queue: mp.Queu
                     if not audio_diff_ok(preview_stream.first_head, head):
                         reset_reason = "same_length_head_mismatch"
                     else:
-                        preview_stream.last_used_at = time.monotonic()
-                        return {
-                            "text": preview_stream.last_text,
-                            "preview_streaming": True,
-                            "preview_delta_samples": 0,
-                            "preview_total_samples": previous_total,
-                            "preview_stream_chars": len(preview_stream.last_text),
-                        }
+                        return preview_stream_response(preview_stream, delta_samples=0, total_samples=previous_total)
 
         if reset_reason is None:
             previous_total = preview_stream.last_sample_count
@@ -1186,10 +1186,8 @@ def worker_main(config: Config, request_queue: mp.Queue, response_queue: mp.Queu
         if reset_reason is not None:
             if not (observed_total > 0 and decoded.size >= max(0, observed_total - tolerance_samples)):
                 decoded = decode_audio_float32(message["audio_path"], sample_rate=sample_rate)
-            chunk_state = init_preview_stream(language, prompt, chunk_cap)
-            reset_count = (preview_stream.reset_count + 1) if preview_stream is not None else 1
             preview_stream = PreviewStreamSession(
-                stream_state=chunk_state,
+                stream_state=init_preview_stream(language, prompt, chunk_cap),
                 last_sample_count=0,
                 first_head=decoded[:overlap_samples].copy(),
                 last_tail=np.array([], dtype=np.float32),
@@ -1197,8 +1195,6 @@ def worker_main(config: Config, request_queue: mp.Queue, response_queue: mp.Queu
                 language=language,
                 prompt=prompt,
                 max_new_tokens=chunk_cap,
-                last_used_at=time.monotonic(),
-                reset_count=reset_count,
             )
             delta = decoded
             observed_total = decoded.size
@@ -1211,7 +1207,6 @@ def worker_main(config: Config, request_queue: mp.Queue, response_queue: mp.Queu
                 preview_stream.first_head = decode_audio_float32(message["audio_path"], sample_rate=sample_rate, start_sec=0, duration_sec=1.0)[:overlap_samples].copy()
             tail_source = delta if delta.size >= overlap_samples else decode_audio_float32(message["audio_path"], sample_rate=sample_rate, start_sec=max(0, (observed_total - overlap_samples) / sample_rate), duration_sec=overlap_samples / sample_rate)
             preview_stream.last_tail = tail_source[-overlap_samples:].copy()
-        preview_stream.last_used_at = time.monotonic()
 
         elapsed = time.perf_counter() - feed_started
         total_samples = preview_stream.last_sample_count
@@ -1221,13 +1216,7 @@ def worker_main(config: Config, request_queue: mp.Queue, response_queue: mp.Queu
             f"feed_elapsed={elapsed:.2f}s chars={len(preview_stream.last_text)}",
             flush=True,
         )
-        response = {
-            "text": preview_stream.last_text,
-            "preview_streaming": True,
-            "preview_delta_samples": int(delta.size),
-            "preview_total_samples": int(total_samples),
-            "preview_stream_chars": len(preview_stream.last_text),
-        }
+        response = preview_stream_response(preview_stream, delta_samples=delta.size, total_samples=total_samples)
         if reset_reason is not None:
             response["preview_reset_reason"] = reset_reason
         return response
