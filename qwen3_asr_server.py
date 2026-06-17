@@ -1093,7 +1093,7 @@ def worker_main(config: Config, request_queue: mp.Queue, response_queue: mp.Queu
     def preview_chunk_max_new_tokens(request_cap: int | None) -> int:
         # mlx-qwen3-asr streaming applies explicit max_new_tokens per internal
         # decode turn, not as a whole-stream budget. Keep preview conservative
-        # so the old sync preview cap does not multiply by every 1.0s chunk.
+        # so the old sync preview cap does not multiply by every 0.5s chunk.
         if request_cap is None:
             return 32
         return max(16, min(request_cap, 32))
@@ -1103,7 +1103,7 @@ def worker_main(config: Config, request_queue: mp.Queue, response_queue: mp.Queu
             context=prompt,
             language=language,
             sample_rate=16000,
-            chunk_size_sec=1.0,
+            chunk_size_sec=0.5,
             max_context_sec=preview_context_seconds(config),
             finalization_mode="latency",
             max_new_tokens=max_new_tokens,
