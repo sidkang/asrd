@@ -32,7 +32,7 @@ Defaults:
 - model cache: `./.cache`
 - Hugging Face endpoint: `https://hf-mirror.com`
 - idle unload: `30s`
-- preview audio window: last `30s`
+- preview streaming context window: `30s`
 
 ## VoxT settings
 
@@ -59,6 +59,7 @@ For LAN use, replace `127.0.0.1` with the server machine IP.
 ## Notes
 
 - VoxT preview uploads named `voxt-openai-preview-*.wav` use the preview model.
+- VoxT HTTP previews are handled as stateful streaming/delta ASR internally.
 - Final uploads use the final model.
 - ASR runs in a worker process, loaded lazily and killed after idle timeout.
 - Requests are serialized to avoid MLX thread/stream issues.
@@ -181,6 +182,20 @@ class State:
     last_used_at: float = 0.0
 
 
+@dataclass
+class PreviewStreamSession:
+    stream_state: Any
+    last_sample_count: int
+    first_head: np.ndarray
+    last_tail: np.ndarray
+    last_text: str
+    language: str | None
+    prompt: str
+    max_new_tokens: int | None
+    last_used_at: float
+    reset_count: int = 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.readme:
@@ -253,13 +268,13 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--preview-max-new-tokens",
         type=optional_positive_int,
         default=optional_positive_int(os.environ.get("ASR_PREVIEW_MAX_NEW_TOKENS", str(DEFAULT_PREVIEW_MAX_NEW_TOKENS))),
-        help="Cap generated tokens for VoxT pseudo-realtime preview uploads. Use 0/none to disable.",
+        help="Cap generated tokens for VoxT pseudo-realtime preview uploads. HTTP streaming preview uses a conservative 16-32 token per-chunk cap derived from this value. Use 0/none to disable sync final-style caps.",
     )
     parser.add_argument(
         "--preview-max-audio-seconds",
         type=float,
         default=float(os.environ.get("ASR_PREVIEW_MAX_AUDIO_SECONDS", DEFAULT_PREVIEW_MAX_AUDIO_SECONDS)),
-        help="For preview uploads, transcribe only the last N seconds of audio. Use 0 to disable.",
+        help="Maximum audio context retained by HTTP preview streaming. Use 0 to disable the context cap.",
     )
     parser.add_argument(
         "--final-max-new-tokens",
@@ -599,7 +614,6 @@ def create_app(config: Config) -> FastAPI:
         suffix = Path(file.filename or "upload.wav").suffix or ".wav"
         tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False, prefix="voxt_asr_")
         tmp_path = tmp.name
-        transcribe_path = tmp_path
         try:
             size = await write_upload_to_temp(file, tmp, config.max_file_size_mb)
             fmt = (response_format or "json").strip().lower()
@@ -610,13 +624,9 @@ def create_app(config: Config) -> FastAPI:
             selected_model = config.preview_model if is_preview else config.model
             max_new_tokens = config.preview_max_new_tokens if is_preview else config.final_max_new_tokens
             audio_duration = audio_duration_seconds(tmp_path)
-            original_audio_duration = audio_duration
-            if is_preview and config.preview_max_audio_seconds > 0 and audio_duration and audio_duration > config.preview_max_audio_seconds:
-                transcribe_path = trim_audio_tail(tmp_path, config.preview_max_audio_seconds)
-                audio_duration = audio_duration_seconds(transcribe_path) or config.preview_max_audio_seconds
             preview_window_log = ""
-            if original_audio_duration and is_preview and transcribe_path != tmp_path:
-                preview_window_log = f"audio={original_audio_duration:.2f}s->window={audio_duration:.2f}s "
+            if audio_duration and is_preview:
+                preview_window_log = f"audio={audio_duration:.2f}s streaming_context={preview_context_label(config)} "
             print(
                 "Transcription request "
                 f"kind={'preview' if is_preview else 'final'} filename={file.filename!r} bytes={size} "
@@ -632,8 +642,9 @@ def create_app(config: Config) -> FastAPI:
                 result = await transcribe_in_worker(
                     state,
                     config,
-                    audio_path=transcribe_path,
+                    audio_path=tmp_path,
                     preview=is_preview,
+                    audio_duration=audio_duration,
                     language=lang,
                     prompt=prompt or "",
                     max_new_tokens=max_new_tokens,
@@ -642,7 +653,7 @@ def create_app(config: Config) -> FastAPI:
                 state.last_used_at = time.monotonic()
             elapsed = time.perf_counter() - started
             text = (result.get("text") or "").strip()
-            print_efficiency(audio_duration, elapsed, len(text), is_preview=is_preview, max_new_tokens=max_new_tokens)
+            print_efficiency(audio_duration, elapsed, len(text), is_preview=is_preview, max_new_tokens=max_new_tokens, metadata=result)
 
             if fmt == "text":
                 return PlainTextResponse(text)
@@ -657,8 +668,6 @@ def create_app(config: Config) -> FastAPI:
         finally:
             try:
                 Path(tmp_path).unlink(missing_ok=True)
-                if transcribe_path != tmp_path:
-                    Path(transcribe_path).unlink(missing_ok=True)
             except Exception:
                 pass
 
@@ -905,6 +914,7 @@ async def transcribe_in_worker(
     *,
     audio_path: str,
     preview: bool,
+    audio_duration: float | None,
     language: str | None,
     prompt: str,
     max_new_tokens: int | None,
@@ -918,6 +928,7 @@ async def transcribe_in_worker(
         config,
         audio_path,
         preview,
+        audio_duration,
         language,
         prompt,
         max_new_tokens,
@@ -930,6 +941,7 @@ def transcribe_in_worker_sync(
     config: Config,
     audio_path: str,
     preview: bool,
+    audio_duration: float | None,
     language: str | None,
     prompt: str,
     max_new_tokens: int | None,
@@ -946,6 +958,7 @@ def transcribe_in_worker_sync(
             "id": request_id,
             "audio_path": audio_path,
             "preview": preview,
+            "audio_duration": audio_duration,
             "language": language,
             "prompt": prompt,
             "max_new_tokens": max_new_tokens,
@@ -1036,6 +1049,7 @@ def worker_main(config: Config, request_queue: mp.Queue, response_queue: mp.Queu
 
     final_session = None
     preview_session = None
+    preview_stream: PreviewStreamSession | None = None
     dtype = {"float16": mx.float16, "float32": mx.float32, "bfloat16": mx.bfloat16}.get(config.dtype, mx.float16)
     timeout = config.unload_after_sec if config.unload_after_sec > 0 else None
 
@@ -1072,6 +1086,146 @@ def worker_main(config: Config, request_queue: mp.Queue, response_queue: mp.Queu
         print(f"Final ASR model loaded elapsed={time.perf_counter() - load_started:.2f}s", flush=True)
         return final_session
 
+    def preview_chunk_max_new_tokens(request_cap: int | None) -> int:
+        # mlx-qwen3-asr streaming applies explicit max_new_tokens per internal
+        # decode turn, not as a whole-stream budget. Keep preview conservative
+        # so the old sync preview cap does not multiply by every 0.5s chunk.
+        if request_cap is None:
+            return 32
+        return max(16, min(request_cap, 32))
+
+    def init_preview_stream(language: str | None, prompt: str, max_new_tokens: int | None):
+        return get_session(True).init_streaming(
+            context=prompt,
+            language=language,
+            sample_rate=16000,
+            chunk_size_sec=0.5,
+            max_context_sec=preview_context_seconds(config),
+            finalization_mode="latency",
+            max_new_tokens=max_new_tokens,
+        )
+
+    def audio_diff_ok(reference: np.ndarray, candidate: np.ndarray, threshold: float = 0.02) -> bool:
+        count = min(reference.size, candidate.size)
+        if count <= 0:
+            return False
+        return float(np.mean(np.abs(reference[:count] - candidate[:count]))) <= threshold
+
+    def handle_preview_message(message: dict[str, Any]) -> dict[str, Any]:
+        nonlocal preview_stream
+        sample_rate = 16000
+        overlap_samples = sample_rate
+        silence_rms = 0.003
+        tolerance_samples = int(0.25 * sample_rate)
+        language = message.get("language")
+        prompt = message.get("prompt") or ""
+        chunk_cap = preview_chunk_max_new_tokens(message.get("max_new_tokens"))
+        duration = message.get("audio_duration")
+        estimated_total = int(round(duration * sample_rate)) if duration and duration > 0 else None
+        reset_reason = None
+        feed_started = time.perf_counter()
+
+        if (
+            preview_stream is None
+            or preview_stream.language != language
+            or preview_stream.prompt != prompt
+            or preview_stream.max_new_tokens != chunk_cap
+        ):
+            reset_reason = "new_stream" if preview_stream is None else "request_context_changed"
+
+        delta: np.ndarray
+        if reset_reason is None and estimated_total is not None:
+            previous_total = preview_stream.last_sample_count
+            if estimated_total <= previous_total:
+                if estimated_total < previous_total - tolerance_samples:
+                    reset_reason = "audio_shrank"
+                else:
+                    head = decode_audio_float32(message["audio_path"], sample_rate=sample_rate, start_sec=0, duration_sec=1.0)
+                    if not audio_diff_ok(preview_stream.first_head, head):
+                        reset_reason = "same_length_head_mismatch"
+                    else:
+                        preview_stream.last_used_at = time.monotonic()
+                        return {
+                            "text": preview_stream.last_text,
+                            "preview_streaming": True,
+                            "preview_delta_samples": 0,
+                            "preview_total_samples": previous_total,
+                            "preview_stream_chars": len(preview_stream.last_text),
+                        }
+
+        if reset_reason is None:
+            previous_total = preview_stream.last_sample_count
+            start_sample = max(0, previous_total - overlap_samples)
+            decode_duration = None
+            if estimated_total is not None:
+                decode_duration = max(0.1, (estimated_total - start_sample) / sample_rate)
+            decoded = decode_audio_float32(message["audio_path"], sample_rate=sample_rate, start_sec=start_sample / sample_rate, duration_sec=decode_duration)
+            expected_overlap = previous_total - start_sample
+            overlap = decoded[:expected_overlap]
+            tail_reference = preview_stream.last_tail[-expected_overlap:]
+            tail_rms = float(np.sqrt(np.mean(np.square(tail_reference)))) if tail_reference.size else 0.0
+            if tail_rms >= silence_rms:
+                if not audio_diff_ok(tail_reference, overlap):
+                    reset_reason = "tail_mismatch"
+            else:
+                head = decode_audio_float32(message["audio_path"], sample_rate=sample_rate, start_sec=0, duration_sec=1.0)
+                if not audio_diff_ok(preview_stream.first_head, head):
+                    reset_reason = "silent_tail_head_mismatch"
+            delta = decoded[expected_overlap:] if reset_reason is None else np.array([], dtype=np.float32)
+            observed_total = start_sample + decoded.size
+        else:
+            observed_total = 0
+            delta = np.array([], dtype=np.float32)
+
+        if reset_reason is not None:
+            if not (observed_total > 0 and decoded.size >= max(0, observed_total - tolerance_samples)):
+                decoded = decode_audio_float32(message["audio_path"], sample_rate=sample_rate)
+            chunk_state = init_preview_stream(language, prompt, chunk_cap)
+            reset_count = (preview_stream.reset_count + 1) if preview_stream is not None else 1
+            preview_stream = PreviewStreamSession(
+                stream_state=chunk_state,
+                last_sample_count=0,
+                first_head=decoded[:overlap_samples].copy(),
+                last_tail=np.array([], dtype=np.float32),
+                last_text="",
+                language=language,
+                prompt=prompt,
+                max_new_tokens=chunk_cap,
+                last_used_at=time.monotonic(),
+                reset_count=reset_count,
+            )
+            delta = decoded
+            observed_total = decoded.size
+
+        if delta.size > 0:
+            preview_stream.stream_state = get_session(True).feed_audio(delta, preview_stream.stream_state)
+            preview_stream.last_text = preview_stream.stream_state.text or ""
+            preview_stream.last_sample_count = observed_total
+            if preview_stream.first_head.size == 0:
+                preview_stream.first_head = decode_audio_float32(message["audio_path"], sample_rate=sample_rate, start_sec=0, duration_sec=1.0)[:overlap_samples].copy()
+            tail_source = delta if delta.size >= overlap_samples else decode_audio_float32(message["audio_path"], sample_rate=sample_rate, start_sec=max(0, (observed_total - overlap_samples) / sample_rate), duration_sec=overlap_samples / sample_rate)
+            preview_stream.last_tail = tail_source[-overlap_samples:].copy()
+        preview_stream.last_used_at = time.monotonic()
+
+        elapsed = time.perf_counter() - feed_started
+        total_samples = preview_stream.last_sample_count
+        print(
+            "Preview stream "
+            f"reset={reset_reason or 'no'} total={total_samples / sample_rate:.2f}s delta={delta.size / sample_rate:.2f}s "
+            f"feed_elapsed={elapsed:.2f}s chars={len(preview_stream.last_text)}",
+            flush=True,
+        )
+        response = {
+            "text": preview_stream.last_text,
+            "preview_streaming": True,
+            "preview_delta_samples": int(delta.size),
+            "preview_total_samples": int(total_samples),
+            "preview_stream_chars": len(preview_stream.last_text),
+        }
+        if reset_reason is not None:
+            response["preview_reset_reason"] = reset_reason
+        return response
+
     try:
         while True:
             try:
@@ -1087,7 +1241,34 @@ def worker_main(config: Config, request_queue: mp.Queue, response_queue: mp.Queu
                 continue
 
             try:
-                result = get_session(bool(message["preview"])).transcribe(
+                if bool(message["preview"]):
+                    try:
+                        result = handle_preview_message(message)
+                    except Exception as preview_exc:
+                        print(
+                            f"WARNING: preview streaming failed; falling back to sync preview transcription: {preview_exc}",
+                            flush=True,
+                        )
+                        fallback_started = time.perf_counter()
+                        fallback = get_session(True).transcribe(
+                            message["audio_path"],
+                            language=message.get("language"),
+                            context=message.get("prompt") or "",
+                            return_timestamps=False,
+                            return_chunks=False,
+                            max_new_tokens=message.get("max_new_tokens"),
+                        )
+                        result = {
+                            "text": fallback.text or "",
+                            "preview_streaming": False,
+                            "preview_fallback_reason": type(preview_exc).__name__,
+                            "preview_fallback_elapsed": time.perf_counter() - fallback_started,
+                        }
+                    response_queue.put({"id": message["id"], "ok": True, **result})
+                    continue
+
+                preview_stream = None
+                result = get_session(False).transcribe(
                     message["audio_path"],
                     language=message.get("language"),
                     context=message.get("prompt") or "",
@@ -1100,6 +1281,7 @@ def worker_main(config: Config, request_queue: mp.Queue, response_queue: mp.Queu
                 traceback.print_exc()
                 response_queue.put({"id": message.get("id"), "ok": False, "error": str(exc)})
     finally:
+        preview_stream = None
         preview_session = None
         final_session = None
         clear_mlx_cache()
@@ -1149,41 +1331,62 @@ def audio_duration_seconds(path: str) -> float | None:
     return wav_duration_seconds(path) or ffprobe_duration_seconds(path)
 
 
-def trim_audio_tail(path: str, max_seconds: float) -> str:
-    if max_seconds <= 0 or shutil.which("ffmpeg") is None:
-        return path
-    output = tempfile.NamedTemporaryFile(suffix=".wav", delete=False, prefix="voxt_asr_preview_tail_")
-    output_path = output.name
-    output.close()
+def decode_audio_float32(path: str, sample_rate: int = 16000, start_sec: float | None = None, duration_sec: float | None = None) -> np.ndarray:
+    if shutil.which("ffmpeg") is None:
+        if start_sec is None and duration_sec is None:
+            return decode_wav_float32(path, sample_rate=sample_rate)
+        raise RuntimeError("ffmpeg is required to decode partial preview audio")
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+    wav_input = Path(path).suffix.lower() == ".wav"
+    # Input-side seeking is exact and cheap for WAV, which is what VoxT's HTTP
+    # preview uploads use. For compressed formats, use output-side seeking for
+    # sample-accurate overlap checks even though it may be slower.
+    if wav_input and start_sec is not None and start_sec > 0:
+        command.extend(["-ss", f"{start_sec:.6f}"])
+    command.extend(["-i", path])
+    if not wav_input and start_sec is not None and start_sec > 0:
+        command.extend(["-ss", f"{start_sec:.6f}"])
+    if duration_sec is not None and duration_sec > 0:
+        command.extend(["-t", f"{duration_sec:.6f}"])
+    command.extend(["-ar", str(sample_rate), "-ac", "1", "-f", "f32le", "pipe:1"])
+    timeout = max(15.0, (duration_sec or audio_duration_seconds(path) or 1.0) + 10.0)
+    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=True)
+    if not result.stdout:
+        return np.array([], dtype=np.float32)
+    return np.frombuffer(result.stdout, dtype=np.float32).copy()
+
+
+def decode_wav_float32(path: str, sample_rate: int = 16000) -> np.ndarray:
     try:
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-sseof",
-                f"-{max_seconds}",
-                "-i",
-                path,
-                "-ar",
-                "16000",
-                "-ac",
-                "1",
-                output_path,
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=max(15.0, max_seconds),
-            check=True,
-        )
-        return output_path
+        with wave.open(path, "rb") as wav:
+            channels = wav.getnchannels()
+            rate = wav.getframerate()
+            width = wav.getsampwidth()
+            frames = wav.readframes(wav.getnframes())
     except Exception as exc:
-        Path(output_path).unlink(missing_ok=True)
-        print(f"WARNING: preview audio trim failed; using full upload: {exc}", flush=True)
-        return path
+        raise RuntimeError("ffmpeg is unavailable and fallback WAV decoding failed") from exc
+
+    if rate != sample_rate:
+        raise RuntimeError(f"ffmpeg is unavailable and WAV sample rate is {rate}, expected {sample_rate}")
+    if width == 1:
+        audio = (np.frombuffer(frames, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    elif width == 2:
+        audio = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+    elif width == 4:
+        audio = np.frombuffer(frames, dtype="<i4").astype(np.float32) / 2147483648.0
+    else:
+        raise RuntimeError(f"ffmpeg is unavailable and WAV sample width {width} is unsupported")
+    if channels > 1:
+        audio = audio.reshape(-1, channels).mean(axis=1)
+    return audio.astype(np.float32, copy=False)
+
+
+def preview_context_seconds(config: Config) -> float:
+    return config.preview_max_audio_seconds if config.preview_max_audio_seconds > 0 else 86400.0
+
+
+def preview_context_label(config: Config) -> str:
+    return f"{config.preview_max_audio_seconds:.2f}s" if config.preview_max_audio_seconds > 0 else "unlimited"
 
 
 def wav_duration_seconds(path: str) -> float | None:
@@ -1213,9 +1416,27 @@ def ffprobe_duration_seconds(path: str) -> float | None:
         return None
 
 
-def print_efficiency(audio_duration: float | None, elapsed: float, text_chars: int, *, is_preview: bool, max_new_tokens: int | None) -> None:
+def print_efficiency(audio_duration: float | None, elapsed: float, text_chars: int, *, is_preview: bool, max_new_tokens: int | None, metadata: dict[str, Any] | None = None) -> None:
     kind = "preview" if is_preview else "final"
     token_cap = f" max_new_tokens={max_new_tokens}" if max_new_tokens is not None else ""
+    if is_preview and metadata and metadata.get("preview_streaming"):
+        delta_samples = int(metadata.get("preview_delta_samples") or 0)
+        total_samples = int(metadata.get("preview_total_samples") or 0)
+        reset = metadata.get("preview_reset_reason")
+        delta_duration = delta_samples / 16000 if delta_samples > 0 else 0.0
+        total_duration = total_samples / 16000 if total_samples > 0 else (audio_duration or 0.0)
+        reset_log = f" reset={reset}" if reset else ""
+        if delta_duration > 0 and elapsed > 0:
+            speed = delta_duration / elapsed
+            rtf = elapsed / delta_duration
+            print(
+                f"Transcription done kind={kind} total={total_duration:.2f}s delta={delta_duration:.2f}s elapsed={elapsed:.2f}s "
+                f"speed={speed:.2f}x rtf={rtf:.3f} chars={text_chars}{token_cap}{reset_log}",
+                flush=True,
+            )
+        else:
+            print(f"Transcription done kind={kind} total={total_duration:.2f}s delta=0.00s elapsed={elapsed:.2f}s chars={text_chars}{token_cap}{reset_log}", flush=True)
+        return
     if audio_duration and audio_duration > 0 and elapsed > 0:
         speed = audio_duration / elapsed
         rtf = elapsed / audio_duration

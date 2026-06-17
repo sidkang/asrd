@@ -51,7 +51,7 @@ For LAN use, replace `127.0.0.1` with the server machine IP.
 - Realtime WebSocket streams use the final model in-process and accept VoxT Aliyun Qwen realtime model names such as `qwen3-asr-flash-realtime`.
 - ASR runs in a worker process, loaded lazily on first use.
 - Realtime ASR uses a separate lazily-loaded in-process session.
-- Preview uploads transcribe only the last 30 seconds by default.
+- Preview uploads are handled as stateful streaming/delta ASR with a 30-second context window by default.
 - The worker process exits after 30 seconds idle by default.
 - Requests are serialized to avoid MLX thread/stream issues.
 - Busy preview requests are skipped with an empty result to avoid backlog.
