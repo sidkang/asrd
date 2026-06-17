@@ -65,6 +65,7 @@ For LAN use, replace `127.0.0.1` with the server machine IP.
 - Requests are serialized to avoid MLX thread/stream issues.
 - Busy preview requests are skipped with an empty result to avoid backlog.
 - Logs include speed and RTF, e.g. `speed=14.11x rtf=0.071`.
+- Use `--debug` to log returned text and preserve final uploaded audio.
 
 Useful commands:
 
@@ -72,6 +73,7 @@ Useful commands:
 uv run qwen3_asr_server.py --readme
 uv run qwen3_asr_server.py --unload-after-sec 0
 uv run qwen3_asr_server.py --preview-max-new-tokens 64
+uv run qwen3_asr_server.py --debug
 HF_ENDPOINT=https://huggingface.co uv run qwen3_asr_server.py
 ```
 """
@@ -118,6 +120,7 @@ DEFAULT_MAX_FILE_SIZE_MB = 512
 DEFAULT_PREVIEW_MAX_NEW_TOKENS = 96
 DEFAULT_PREVIEW_MAX_AUDIO_SECONDS = 30.0
 DEFAULT_UNLOAD_AFTER_SEC = 30.0
+DEFAULT_DEBUG_DIR = str(Path.home() / "Library" / "Logs" / "com.sid.voxt-qwen3-asr.debug")
 WORKER_PIDFILE = Path("/tmp/voxt-qwen3-asr-worker.pid")
 
 LANGUAGE_ALIASES = {
@@ -166,6 +169,8 @@ class Config:
     preview_max_audio_seconds: float
     preview_max_new_tokens: int | None
     final_max_new_tokens: int | None
+    debug: bool
+    debug_dir: str
 
 
 @dataclass
@@ -227,6 +232,8 @@ def main(argv: list[str] | None = None) -> int:
             max_file_size_mb=args.max_file_size_mb,
             preview_max_new_tokens=args.preview_max_new_tokens,
             final_max_new_tokens=args.final_max_new_tokens,
+            debug=args.debug,
+            debug_dir=args.debug_dir,
         )
     )
     try:
@@ -280,8 +287,26 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=optional_positive_int(os.environ.get("ASR_FINAL_MAX_NEW_TOKENS", "0")),
         help="Cap generated tokens for final uploads. Default uses mlx-qwen3-asr auto sizing.",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=env_bool("ASR_DEBUG"),
+        help="Log returned text and preserve final uploaded audio for debugging.",
+    )
+    parser.add_argument(
+        "--debug-dir",
+        default=os.environ.get("ASR_DEBUG_DIR", DEFAULT_DEBUG_DIR),
+        help=f"Directory for --debug artifacts. Defaults to {DEFAULT_DEBUG_DIR}.",
+    )
     parser.add_argument("--log-level", default=os.environ.get("ASR_LOG_LEVEL", "info"))
     return parser.parse_args(argv)
+
+
+def env_bool(name: str) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on", "debug"}
 
 
 def optional_positive_int(value: str | int | None) -> int | None:
@@ -396,6 +421,8 @@ def create_app(config: Config) -> FastAPI:
             "idle_for_sec": round(idle_for, 3) if idle_for is not None else None,
             "idle_remaining_sec": round(idle_remaining, 3) if idle_remaining is not None else None,
             "unload_after_sec": config.unload_after_sec,
+            "debug": config.debug,
+            "debug_dir": config.debug_dir if config.debug else None,
         }
 
     @app.get("/v1/models")
@@ -445,6 +472,8 @@ def create_app(config: Config) -> FastAPI:
                         text = stream_state.text or ""
                         if text and text != last_text:
                             last_text = text
+                            if config.debug:
+                                log_debug_realtime_text(protocol="aliyun-fun", text=text, sentence_end=False)
                             await send_aliyun_fun_result(websocket, fun_task_id, text, sentence_end=False)
                     continue
                 message = received.get("text")
@@ -497,6 +526,8 @@ def create_app(config: Config) -> FastAPI:
                     stream_state = await ws_finish_stream(state, config, stream_state)
                     text = stream_state.text or last_text
                     if text:
+                        if config.debug:
+                            log_debug_realtime_text(protocol="aliyun-fun", text=text, sentence_end=True)
                         await send_aliyun_fun_result(websocket, fun_task_id, text, sentence_end=True)
                     await send_aliyun_fun_event(websocket, fun_task_id, "task-finished")
                     await websocket.close(code=1000)
@@ -552,6 +583,8 @@ def create_app(config: Config) -> FastAPI:
                         if text and text != last_text:
                             delta = text[len(last_text) :] if text.startswith(last_text) else text
                             last_text = text
+                            if config.debug:
+                                log_debug_realtime_text(protocol="openai-realtime", text=text, delta=delta, sentence_end=False)
                             await websocket.send_json(
                                 {
                                     "type": "conversation.item.input_audio_transcription.text",
@@ -572,12 +605,15 @@ def create_app(config: Config) -> FastAPI:
                     stream_state = await ws_finish_stream(state, config, stream_state)
                     text = stream_state.text or ""
                     if text and text != last_text:
+                        delta = text[len(last_text) :] if text.startswith(last_text) else text
+                        if config.debug:
+                            log_debug_realtime_text(protocol="openai-realtime", text=text, delta=delta, sentence_end=True)
                         await websocket.send_json(
                             {
                                 "type": "conversation.item.input_audio_transcription.text",
                                 "event_id": new_event_id(),
                                 "text": text,
-                                "delta": text[len(last_text) :] if text.startswith(last_text) else text,
+                                "delta": delta,
                             }
                         )
                     await websocket.send_json(
@@ -617,11 +653,14 @@ def create_app(config: Config) -> FastAPI:
         is_preview = should_use_preview_model(request_model, file.filename, config)
         if is_preview and state.inference_lock.locked():
             print(f"Skipping preview while ASR worker is busy filename={file.filename!r}", flush=True)
+            if config.debug:
+                log_debug_transcription_text(is_preview=True, text="")
             return JSONResponse({"text": ""})
 
         suffix = Path(file.filename or "upload.wav").suffix or ".wav"
         tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False, prefix="voxt_asr_")
         tmp_path = tmp.name
+        debug_audio_path: Path | None = None
         try:
             size = await write_upload_to_temp(file, tmp, config.max_file_size_mb)
             fmt = (response_format or "json").strip().lower()
@@ -632,6 +671,8 @@ def create_app(config: Config) -> FastAPI:
             selected_model = config.preview_model if is_preview else config.model
             max_new_tokens = config.preview_max_new_tokens if is_preview else config.final_max_new_tokens
             audio_duration = audio_duration_seconds(tmp_path)
+            if config.debug and not is_preview:
+                debug_audio_path = preserve_debug_final_audio(config, tmp_path, file.filename)
             preview_window_log = ""
             if audio_duration and is_preview:
                 preview_window_log = f"audio={audio_duration:.2f}s streaming_context={preview_context_label(config)} "
@@ -662,6 +703,19 @@ def create_app(config: Config) -> FastAPI:
             elapsed = time.perf_counter() - started
             text = (result.get("text") or "").strip()
             print_efficiency(audio_duration, elapsed, len(text), is_preview=is_preview, max_new_tokens=max_new_tokens, metadata=result)
+            if config.debug:
+                log_debug_transcription_text(is_preview=is_preview, text=text)
+                if debug_audio_path is not None:
+                    write_debug_transcription_metadata(
+                        debug_audio_path,
+                        request_filename=file.filename,
+                        request_model=request_model,
+                        selected_model=selected_model,
+                        language=lang,
+                        audio_duration=audio_duration,
+                        elapsed=elapsed,
+                        text=text,
+                    )
 
             if fmt == "text":
                 return PlainTextResponse(text)
@@ -1444,6 +1498,71 @@ def print_efficiency(audio_duration: float | None, elapsed: float, text_chars: i
         print(f"Transcription done kind={kind} elapsed={elapsed:.2f}s chars={text_chars}{token_cap}", flush=True)
 
 
+def preserve_debug_final_audio(config: Config, audio_path: str, filename: str | None) -> Path | None:
+    try:
+        target_dir = Path(config.debug_dir).expanduser().resolve() / "final-audio"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = safe_debug_filename(filename or "audio.wav")
+        suffix = Path(safe_name).suffix or Path(audio_path).suffix or ".wav"
+        stem = Path(safe_name).stem or "audio"
+        timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+        target = target_dir / f"{timestamp}-{uuid.uuid4().hex[:8]}-{stem}{suffix}"
+        shutil.copy2(audio_path, target)
+        print(f"DEBUG final audio saved path={str(target)!r}", flush=True)
+        return target
+    except Exception as exc:
+        print(f"WARNING: failed to preserve debug final audio: {exc}", file=sys.stderr, flush=True)
+        return None
+
+
+def write_debug_transcription_metadata(
+    audio_path: Path,
+    *,
+    request_filename: str | None,
+    request_model: str,
+    selected_model: str,
+    language: str | None,
+    audio_duration: float | None,
+    elapsed: float,
+    text: str,
+) -> None:
+    try:
+        metadata_path = audio_path.with_suffix(audio_path.suffix + ".json")
+        metadata = {
+            "request_filename": request_filename,
+            "request_model": request_model,
+            "selected_model": selected_model,
+            "language": language,
+            "audio_duration_sec": audio_duration,
+            "elapsed_sec": elapsed,
+            "text_chars": len(text),
+            "text": text,
+        }
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"DEBUG final metadata saved path={str(metadata_path)!r}", flush=True)
+    except Exception as exc:
+        print(f"WARNING: failed to write debug final metadata: {exc}", file=sys.stderr, flush=True)
+
+
+def log_debug_transcription_text(*, is_preview: bool, text: str) -> None:
+    kind = "preview" if is_preview else "final"
+    print(f"DEBUG transcription text kind={kind} chars={len(text)} text={text!r}", flush=True)
+
+
+def log_debug_realtime_text(*, protocol: str, text: str, sentence_end: bool, delta: str | None = None) -> None:
+    delta_log = f" delta_chars={len(delta)} delta={delta!r}" if delta is not None else ""
+    print(
+        f"DEBUG realtime text protocol={protocol} sentence_end={sentence_end} "
+        f"chars={len(text)} text={text!r}{delta_log}",
+        flush=True,
+    )
+
+
+def safe_debug_filename(filename: str) -> str:
+    base = Path(filename).name.strip() or "audio.wav"
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", base)[:180] or "audio.wav"
+
+
 def masked_api_key(api_key: str) -> str:
     if not api_key:
         return "not set"
@@ -1472,6 +1591,8 @@ Model:
   DType:             {args.dtype}
   Cache:             {os.environ['HUGGINGFACE_HUB_CACHE']}
   HF endpoint:       {os.environ.get('HF_ENDPOINT', 'https://huggingface.co')}
+  Debug:             {'on' if args.debug else 'off'}
+  Debug dir:         {args.debug_dir if args.debug else '-'}
 
 VoxT Remote ASR:
   Provider:          OpenAI Transcribe

@@ -16,6 +16,7 @@
       <string>5100</string>
       <string>--unload-after-sec</string>
       <string>30</string>
+      <string>--debug</string>
     </array>
 
     <key>WorkingDirectory</key>

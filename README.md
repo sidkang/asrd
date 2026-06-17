@@ -57,6 +57,7 @@ For LAN use, replace `127.0.0.1` with the server machine IP.
 - Requests are serialized to avoid MLX thread/stream issues.
 - Busy preview requests are skipped with an empty result to avoid backlog.
 - Logs include speed and RTF, for example `speed=14.11x rtf=0.071`.
+- Use `--debug` to log returned text and preserve final uploaded audio.
 
 ## Useful options
 
@@ -76,6 +77,9 @@ uv run qwen3_asr_server.py \
 uv run qwen3_asr_server.py \
   --preview-model mlx-community/Qwen3-ASR-0.6B-6bit \
   --preview-max-new-tokens 64
+
+# log returned text and save final uploaded audio under ~/Library/Logs/com.sid.voxt-qwen3-asr.debug
+uv run qwen3_asr_server.py --debug
 
 # use official Hugging Face instead of mirror
 HF_ENDPOINT=https://huggingface.co uv run qwen3_asr_server.py
