@@ -1106,9 +1106,6 @@ def worker_main(config: Config, request_queue: mp.Queue, response_queue: mp.Queu
             chunk_size_sec=0.5,
             max_context_sec=preview_context_seconds(config),
             finalization_mode="latency",
-            endpointing_mode="energy",
-            endpoint_lookback_sec=0.3,
-            endpoint_min_chunk_sec=0.2,
             max_new_tokens=max_new_tokens,
         )
 
