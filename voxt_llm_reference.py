@@ -46,7 +46,7 @@ DEFAULT_UPSTREAM_API_KEY = os.environ.get("VOXT_LLM_UPSTREAM_API_KEY", "")
 DEFAULT_MODEL = os.environ.get("VOXT_LLM_MODEL", "")
 DEFAULT_WHISPER_URL = os.environ.get("VOXT_WHISPER_URL", "http://127.0.0.1:5100/v1/audio/transcriptions")
 DEFAULT_WHISPER_API_KEY = os.environ.get("VOXT_WHISPER_API_KEY", "password")
-DEFAULT_WHISPER_MODEL = os.environ.get("VOXT_WHISPER_MODEL", "mlx-community/Qwen3-ASR-1.7B-6bit")
+DEFAULT_WHISPER_MODEL = os.environ.get("VOXT_WHISPER_MODEL", "mlx-community/Qwen3-ASR-1.7B-8bit")
 DEFAULT_LONG_TEXT_THRESHOLD = 300
 DEFAULT_SEGMENT_CHARACTER_LIMIT = 280
 

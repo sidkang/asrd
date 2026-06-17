@@ -27,9 +27,9 @@ Defaults:
 - realtime endpoint: `ws://127.0.0.1:5100/v1/realtime`
 - bind: `0.0.0.0:5100`
 - API key: `password`
-- final model: `mlx-community/Qwen3-ASR-1.7B-6bit`
-- preview model: `mlx-community/Qwen3-ASR-0.6B-4bit`
-- model cache: `./.cache`
+- final model: `mlx-community/Qwen3-ASR-1.7B-8bit`
+- preview model: `mlx-community/Qwen3-ASR-0.6B-6bit`
+- model cache: `~/.cache/huggingface/hub`
 - Hugging Face endpoint: `https://hf-mirror.com`
 - idle unload: `30s`
 - preview streaming context window: `30s`
@@ -40,7 +40,7 @@ Defaults:
 Provider: OpenAI Transcribe
 Endpoint: http://127.0.0.1:5100/v1/audio/transcriptions
 API Key: password
-Model: mlx-community/Qwen3-ASR-1.7B-6bit
+Model: mlx-community/Qwen3-ASR-1.7B-8bit
 Chunk Pseudo Realtime Preview: On
 ```
 
@@ -111,8 +111,8 @@ from huggingface_hub import snapshot_download
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 5100
 DEFAULT_API_KEY = "password"
-DEFAULT_MODEL = "mlx-community/Qwen3-ASR-1.7B-6bit"
-DEFAULT_PREVIEW_MODEL = "mlx-community/Qwen3-ASR-0.6B-4bit"
+DEFAULT_MODEL = "mlx-community/Qwen3-ASR-1.7B-8bit"
+DEFAULT_PREVIEW_MODEL = "mlx-community/Qwen3-ASR-0.6B-6bit"
 DEFAULT_DTYPE = "float16"
 DEFAULT_MAX_FILE_SIZE_MB = 512
 DEFAULT_PREVIEW_MAX_NEW_TOKENS = 96
@@ -254,8 +254,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--dtype", choices=sorted(DTYPE_NAMES), default=os.environ.get("ASR_DTYPE", DEFAULT_DTYPE))
     parser.add_argument(
         "--cache-dir",
-        default=os.environ.get("ASR_MODEL_CACHE_DIR", str(Path.cwd() / ".cache")),
-        help="Model cache root. Defaults to ./.cache in the current directory.",
+        default=os.environ.get("ASR_MODEL_CACHE_DIR", str(Path.home() / ".cache")),
+        help="Model cache root. Defaults to ~/.cache so models use the global Hugging Face cache.",
     )
     parser.add_argument("--max-file-size-mb", type=int, default=int(os.environ.get("ASR_MAX_FILE_SIZE_MB", DEFAULT_MAX_FILE_SIZE_MB)))
     parser.add_argument(
@@ -471,8 +471,12 @@ def create_app(config: Config) -> FastAPI:
                     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
                     parameters = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
                     fun_task_id = str(header.get("task_id") or new_event_id())
-                    requested_model = payload.get("model")
-                    selected_model = select_realtime_model(str(requested_model or ""), config)
+                    requested_model = str(payload.get("model") or "").strip()
+                    if not requested_model:
+                        await websocket_send_error(websocket, "missing_model", "model must be a non-empty string")
+                        await websocket.close(code=1008)
+                        return
+                    selected_model = select_realtime_model(requested_model, config)
                     hints = parameters.get("language_hints") if isinstance(parameters.get("language_hints"), list) else []
                     language = normalize_language(str(hints[0])) if hints else None
                     print(
@@ -503,8 +507,13 @@ def create_app(config: Config) -> FastAPI:
                     session = event.get("session") if isinstance(event.get("session"), dict) else {}
                     language = normalize_language(session.get("language") or event.get("language"))
                     prompt = str(session.get("prompt") or session.get("context") or event.get("prompt") or "")
-                    requested_model = session.get("model") or event.get("model")
-                    selected_model = select_realtime_model(str(requested_model or ""), config)
+                    transcription = session.get("input_audio_transcription") if isinstance(session.get("input_audio_transcription"), dict) else {}
+                    requested_model = str(session.get("model") or transcription.get("model") or event.get("model") or "").strip()
+                    if not requested_model:
+                        await websocket_send_error(websocket, "missing_model", "model must be a non-empty string")
+                        await websocket.close(code=1008)
+                        return
+                    selected_model = select_realtime_model(requested_model, config)
                     print(
                         f"Realtime WS session.update client={client} request_model={requested_model!r} "
                         f"selected_model={selected_model!r} language={language!r} prompt_chars={len(prompt)}",
@@ -606,7 +615,8 @@ def create_app(config: Config) -> FastAPI:
         if state.inference_lock is None:
             raise HTTPException(status_code=503, detail="ASR runtime is not ready")
 
-        is_preview = should_use_preview_model(model, file.filename, config)
+        request_model = require_non_empty_model(model)
+        is_preview = should_use_preview_model(request_model, file.filename, config)
         if is_preview and state.inference_lock.locked():
             print(f"Skipping preview while ASR worker is busy filename={file.filename!r}", flush=True)
             return JSONResponse({"text": ""})
@@ -631,7 +641,7 @@ def create_app(config: Config) -> FastAPI:
                 "Transcription request "
                 f"kind={'preview' if is_preview else 'final'} filename={file.filename!r} bytes={size} "
                 f"{preview_window_log}"
-                f"request_model={model!r} selected_model={selected_model!r} "
+                f"request_model={request_model!r} selected_model={selected_model!r} "
                 f"language={language!r}->{lang!r} prompt_chars={len(prompt or '')} format={fmt!r}",
                 flush=True,
             )
@@ -793,12 +803,8 @@ def websocket_auth_ok(websocket: WebSocket, api_key: str) -> bool:
 
 def select_realtime_model(request_model: str, config: Config) -> str:
     requested = request_model.strip()
-    if requested == config.model:
-        return config.model
-    if requested and requested == config.preview_model:
-        print("Realtime preview model requested; using final model because streaming uses the final session", flush=True)
-    elif requested and requested != config.model:
-        print(f"Realtime model {requested!r} requested; using final model {config.model!r}", flush=True)
+    if requested != config.model:
+        print(f"Realtime model {requested!r} requested; serving configured final model {config.model!r}", flush=True)
     return config.model
 
 
@@ -1292,6 +1298,13 @@ def check_auth(request: Request, api_key: str) -> None:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
+def require_non_empty_model(model: Optional[str]) -> str:
+    value = (model or "").strip()
+    if not value:
+        raise HTTPException(status_code=400, detail="model must be a non-empty string")
+    return value
+
+
 def normalize_language(language: Optional[str]) -> Optional[str]:
     if not language or not language.strip():
         return None
@@ -1319,12 +1332,9 @@ def is_voxt_preview_upload(filename: str | None) -> bool:
 
 
 def should_use_preview_model(request_model: str | None, filename: str | None, config: Config) -> bool:
-    # VoxT preview uploads still send the configured final model, so the
-    # preview filename is the strongest signal. For non-VoxT clients, an
-    # explicit preview model form value can also select the preview path.
-    if is_voxt_preview_upload(filename):
-        return True
-    return bool(request_model and request_model.strip() == config.preview_model)
+    # Request model names only need to be non-empty; they do not need to match
+    # configured model ids. VoxT preview routing is identified by filename.
+    return is_voxt_preview_upload(filename)
 
 
 def audio_duration_seconds(path: str) -> float | None:

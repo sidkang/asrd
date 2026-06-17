@@ -14,9 +14,9 @@ Defaults:
 - realtime endpoint: `ws://127.0.0.1:5100/v1/realtime`
 - bind: `0.0.0.0:5100`
 - API key: `password`
-- final model: `mlx-community/Qwen3-ASR-1.7B-6bit`
-- preview model: `mlx-community/Qwen3-ASR-0.6B-4bit`
-- model cache: `./.cache`
+- final model: `mlx-community/Qwen3-ASR-1.7B-8bit`
+- preview model: `mlx-community/Qwen3-ASR-0.6B-6bit`
+- model cache: `~/.cache/huggingface/hub`
 - Hugging Face endpoint: `https://hf-mirror.com`
 - idle unload: `30s`
 
@@ -28,7 +28,7 @@ Use VoxT's remote ASR provider:
 Provider: OpenAI Transcribe
 Endpoint: http://127.0.0.1:5100/v1/audio/transcriptions
 API Key: password
-Model: mlx-community/Qwen3-ASR-1.7B-6bit
+Model: mlx-community/Qwen3-ASR-1.7B-8bit
 Chunk Pseudo Realtime Preview: On
 ```
 
@@ -46,6 +46,7 @@ For LAN use, replace `127.0.0.1` with the server machine IP.
 
 ## Behavior
 
+- Request model names only need to be non-empty; service-side routing chooses the actual configured models.
 - VoxT preview uploads named `voxt-openai-preview-*.wav` use the preview model.
 - Final uploads use the final model.
 - Realtime WebSocket streams use the final model in-process and accept VoxT Aliyun Qwen realtime model names such as `qwen3-asr-flash-realtime`.
@@ -68,12 +69,12 @@ uv run qwen3_asr_server.py --unload-after-sec 120
 
 # use one model for both preview and final
 uv run qwen3_asr_server.py \
-  --model mlx-community/Qwen3-ASR-1.7B-6bit \
-  --preview-model mlx-community/Qwen3-ASR-1.7B-6bit
+  --model mlx-community/Qwen3-ASR-1.7B-8bit \
+  --preview-model mlx-community/Qwen3-ASR-1.7B-8bit
 
 # faster preview
 uv run qwen3_asr_server.py \
-  --preview-model mlx-community/Qwen3-ASR-0.6B-4bit \
+  --preview-model mlx-community/Qwen3-ASR-0.6B-6bit \
   --preview-max-new-tokens 64
 
 # use official Hugging Face instead of mirror
