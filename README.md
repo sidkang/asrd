@@ -1,28 +1,198 @@
-# voxt-qwen3-asr
+# asrd
 
-Local OpenAI-compatible ASR server for VoxT on Apple Silicon/MLX, powered by `mlx-qwen3-asr`.
+[![CI](https://github.com/sidkang/asrd/actions/workflows/ci.yml/badge.svg)](https://github.com/sidkang/asrd/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
 
-## Run
+A local OpenAI-compatible ASR daemon for Apple Silicon, powered by MLX and Qwen3-ASR.
+
+`asrd` exposes a small local speech-to-text service with:
+
+- OpenAI-compatible HTTP transcription: `POST /v1/audio/transcriptions`
+- Realtime WebSocket transcription: `GET /v1/realtime`
+- macOS LaunchAgent installation via the built-in CLI
+- VoxT-friendly HTTP chunk preview and realtime WebSocket behavior
+
+> `asrd` stands on the shoulders of [`mlx-qwen3-asr`](https://github.com/moona3k/mlx-qwen3-asr) and the Qwen3-ASR models. Model loading, transcription, generation, and forced alignment come from that ecosystem. This project is a local service wrapper, gateway, deployment helper, and realtime/chunking policy layer around it. Many thanks to the MLX/Qwen3-ASR maintainers and contributors for making this practical on Apple Silicon.
+
+## Requirements
+
+- macOS on Apple Silicon
+- Python `>=3.10`
+- [`uv`](https://docs.astral.sh/uv/)
+- `ffmpeg` available on `PATH` for non-WAV audio input
 
 ```bash
-uv run qwen3_asr_server.py
+brew install uv ffmpeg
+```
+
+## Installation
+
+`asrd` is not published to PyPI. Install or run it directly from Git.
+
+Run once without installing:
+
+```bash
+uvx --from git+https://github.com/sidkang/asrd.git asrd --help
+```
+
+Install as a persistent user tool:
+
+```bash
+uv tool install git+https://github.com/sidkang/asrd.git
+asrd --help
+```
+
+Upgrade later:
+
+```bash
+uv tool upgrade asrd
+```
+
+## Quick start
+
+Check the local environment:
+
+```bash
+asrd doctor
+```
+
+Run the server in the foreground:
+
+```bash
+asrd serve
+```
+
+Default endpoints:
+
+```text
+HTTP: http://127.0.0.1:5100/v1/audio/transcriptions
+WS:   ws://127.0.0.1:5100/v1/realtime
+```
+
+Default API key:
+
+```text
+password
+```
+
+The default bind address is `127.0.0.1`. Use `--host 0.0.0.0` only when you intentionally want to expose the service on your LAN, and change the default API key for shared machines or untrusted networks.
+
+Health check:
+
+```bash
+curl -H 'Authorization: Bearer password' http://127.0.0.1:5100/health
+```
+
+Transcribe a file:
+
+```bash
+curl http://127.0.0.1:5100/v1/audio/transcriptions \
+  -H 'Authorization: Bearer password' \
+  -F model=mlx-community/Qwen3-ASR-1.7B-8bit \
+  -F file=@sample.wav
+```
+
+## macOS service
+
+Install and start a user LaunchAgent:
+
+```bash
+asrd service install
+```
+
+Manage it:
+
+```bash
+asrd service status
+asrd service restart
+asrd service logs
+asrd service uninstall
+```
+
+Service files and logs:
+
+```text
+Label:  com.sid.asrd
+Plist:  ~/Library/LaunchAgents/com.sid.asrd.plist
+Stdout: ~/Library/Logs/com.sid.asrd.out.log
+Stderr: ~/Library/Logs/com.sid.asrd.err.log
+Debug:  ~/Library/Logs/com.sid.asrd.debug
+```
+
+Install with custom options:
+
+```bash
+asrd service install \
+  --host 127.0.0.1 \
+  --port 5100 \
+  --api-key password \
+  --unload-after-sec 30
+```
+
+For LAN access, pass `--host 0.0.0.0` and use a non-default API key.
+
+## Configuration
+
+Useful `serve` options:
+
+```bash
+# keep models loaded
+asrd serve --unload-after-sec 0
+
+# unload after two minutes idle
+asrd serve --unload-after-sec 120
+
+# preserve debug audio artifacts and compact JSON sidecars
+asrd serve --debug
+
+# use the official Hugging Face endpoint instead of the default mirror
+HF_ENDPOINT=https://huggingface.co asrd serve
 ```
 
 Defaults:
 
-- endpoint: `http://127.0.0.1:5100/v1/audio/transcriptions`
-- realtime endpoint: `ws://127.0.0.1:5100/v1/realtime`
-- bind: `0.0.0.0:5100`
-- API key: `password`
-- final model: `mlx-community/Qwen3-ASR-1.7B-8bit`
-- preview model: `mlx-community/Qwen3-ASR-0.6B-6bit`
-- model cache: `~/.cache/huggingface/hub`
-- Hugging Face endpoint: `https://hf-mirror.com`
-- idle unload: `30s`
+| Setting | CLI | Default |
+|---|---|---|
+| Host | `--host` | `127.0.0.1` |
+| Port | `--port` | `5100` |
+| API key | `--api-key` | `password` |
+| Preview model | `--preview-model` | `mlx-community/Qwen3-ASR-0.6B-6bit` |
+| Final model | `--model` | `mlx-community/Qwen3-ASR-1.7B-8bit` |
+| Model cache | `--cache-dir` | `~/.cache` |
+| Hugging Face endpoint | `HF_ENDPOINT` | `https://hf-mirror.com` |
+| Idle unload | `--unload-after-sec` | `30` |
+| Debug | `--debug` | off |
+| Debug dir | `--debug-dir` | `~/Library/Logs/com.sid.asrd.debug` |
 
-## VoxT settings
+With `--debug`, each captured audio file is saved directly under `debug_dir` with a same-basename compact `.json` sidecar.
 
-Use VoxT's remote ASR provider:
+## Realtime WebSocket
+
+The canonical realtime route is:
+
+```text
+ws://127.0.0.1:5100/v1/realtime
+```
+
+The protocol is compatible with Aliyun Bailian/Qwen-style realtime ASR clients:
+
+```text
+receive: session.update
+send:    session.updated
+receive: input_audio_buffer.append
+send:    conversation.item.input_audio_transcription.text
+receive: session.finish
+send:    conversation.item.input_audio_transcription.completed
+send:    session.finished
+```
+
+`session.finish` sends an interim partial, waits briefly for 1.7B final correction, then always sends `completed` and `session.finished` using corrected or best-available text.
+
+## VoxT setup
+
+`asrd` is a general local ASR daemon, but it includes behavior tuned for VoxT.
+
+### OpenAI Transcribe provider
 
 ```text
 Provider: OpenAI Transcribe
@@ -32,10 +202,10 @@ Model: mlx-community/Qwen3-ASR-1.7B-8bit
 Chunk Pseudo Realtime Preview: On
 ```
 
-Or use VoxT's realtime ASR provider:
+### Aliyun Bailian ASR provider
 
 ```text
-Provider: Aliyun Qwen Realtime ASR
+Provider: Aliyun Bailian ASR
 Endpoint: ws://127.0.0.1:5100/v1/realtime
 API Key: password
 Model: qwen3-asr-flash-realtime
@@ -44,102 +214,20 @@ Audio: PCM16 mono 16k
 
 For LAN use, replace `127.0.0.1` with the server machine IP.
 
-## Behavior
+## Behavior notes
 
-- Request model names only need to be non-empty; service-side routing chooses the actual configured models.
-- VoxT preview uploads named `voxt-openai-preview-*.wav` use the preview model.
-- Final uploads use the final model.
-- Realtime WebSocket streams use the final model in-process and accept VoxT Aliyun Qwen realtime model names such as `qwen3-asr-flash-realtime`.
-- ASR runs in a worker process, loaded lazily on first use.
-- Realtime ASR uses a separate lazily-loaded in-process session.
-- Preview uploads are handled as stateful streaming/delta ASR with a 30-second context window by default.
-- The worker process exits after 30 seconds idle by default.
-- Requests are serialized to avoid MLX thread/stream issues.
-- Busy preview requests are skipped with an empty result to avoid backlog.
-- Logs include speed and RTF, for example `speed=14.11x rtf=0.071`.
-- Use `--debug` to log returned text and preserve final uploaded audio.
+- HTTP/WS preview uses the 0.6B model; final/correction uses the 1.7B model.
+- VoxT HTTP preview uploads are detected by `voxt-openai-preview-*.wav`.
+- Matching HTTP final uploads reuse the preview correction cache; plain uploads use full one-shot transcription.
+- Request-provided language/context/hotwords are passed through; no defaults are injected.
+- Logs include latency, speed, and RTF summaries.
 
-## Useful options
+## Resource usage
 
-```bash
-# keep models loaded
-uv run qwen3_asr_server.py --unload-after-sec 0
+Models are loaded lazily and unloaded after 30 seconds idle by default. Realtime use loads the 0.6B preview model in the main process and starts a separate 1.7B correction worker when rolling or final correction is needed.
 
-# unload sooner/later
-uv run qwen3_asr_server.py --unload-after-sec 120
+Expect several GB of memory use during active transcription. The 1.7B correction worker is the main cost and can peak around 7–8 GB on longer clips. Use `--unload-after-sec 0` to keep models warm, or keep the default idle unload to free memory between requests.
 
-# use one model for both preview and final
-uv run qwen3_asr_server.py \
-  --model mlx-community/Qwen3-ASR-1.7B-8bit \
-  --preview-model mlx-community/Qwen3-ASR-1.7B-8bit
+## License
 
-# faster preview
-uv run qwen3_asr_server.py \
-  --preview-model mlx-community/Qwen3-ASR-0.6B-6bit \
-  --preview-max-new-tokens 64
-
-# log returned text and save final uploaded audio under ~/Library/Logs/com.sid.voxt-qwen3-asr.debug
-uv run qwen3_asr_server.py --debug
-
-# use official Hugging Face instead of mirror
-HF_ENDPOINT=https://huggingface.co uv run qwen3_asr_server.py
-```
-
-## VoxT-style LLM reference API
-
-`voxt_llm_reference.py` is an independent reference API for VoxT-style ASR and ASR → LLM chains:
-
-- Whisper/OpenAI final transcription call
-- Whisper/OpenAI chunk preview call
-- transcription enhancement
-- translation
-- rewrite
-
-It keeps VoxT-like default prompts and only includes LLM runtime fields VoxT sets itself for these chains: `max_tokens`, `temperature`, `top_p`, plus DeepSeek JSON response format for structured rewrite. It also includes reference implementations for ASR hint compilation, visible-output cleanup, structured rewrite parsing, and long-text segmentation.
-
-```bash
-uv run voxt_llm_reference.py --port 5112
-
-curl http://127.0.0.1:5112/v1/voxt/transcription \
-  -H 'content-type: application/json' \
-  -d '{"text":"um hello world","dry_run":true}'
-```
-
-Reference Whisper/OpenAI calls:
-
-```bash
-# final transcription-style call
-curl http://127.0.0.1:5112/v1/voxt/whisper/transcribe \
-  -F file=@sample.wav
-
-# VoxT chunk pseudo-realtime preview-style call
-curl http://127.0.0.1:5112/v1/voxt/whisper/chunk \
-  -F file=@sample.wav
-```
-
-ASR hint compilation:
-
-```bash
-curl http://127.0.0.1:5112/v1/voxt/asr-hint/compile \
-  -H 'content-type: application/json' \
-  -d '{"target":"openai_whisper","user_main_language":"Chinese","user_other_languages":["English","Japanese"],"dictionary_terms":"VoxT\nQwen3-ASR"}'
-```
-
-Supported Jinja variables:
-
-```txt
-{{USER_MAIN_LANGUAGE}}
-{{USER_OTHER_LANGUAGES}}
-{{TARGET_LANGUAGE}}
-{{DICTIONARY_TERMS}}
-```
-
-`dictionary_terms` feeds `{{DICTIONARY_TERMS}}`; `dictionary_glossary` is added as a separate LLM context block. Long inputs are segmented by default after 300 characters.
-
-Set `upstream_url`, `upstream_api_key`, and `model` in the request body to call an OpenAI-compatible LLM. Set multipart fields `endpoint`, `api_key`, and `model` to override the Whisper/OpenAI ASR target.
-
-## Health check
-
-```bash
-curl http://127.0.0.1:5100/health
-```
+Apache-2.0. See [LICENSE](LICENSE).

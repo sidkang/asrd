@@ -1,7 +1,8 @@
 [project]
-name = "voxt-qwen3-asr"
-version = "0.1.0"
-description = "Local OpenAI-compatible Qwen3-ASR server for VoxT"
+name = "asrd"
+version = "0.2.1"
+description = "Local OpenAI-compatible ASR daemon powered by MLX/Qwen3-ASR"
+license = "Apache-2.0"
 requires-python = ">=3.10"
 dependencies = [
   "huggingface_hub>=1.0",
@@ -10,6 +11,20 @@ dependencies = [
   "websockets>=12.0",
 ]
 
+[dependency-groups]
+dev = [
+  "pytest>=8.0",
+]
 
-[tool.uv]
-package = false
+[project.scripts]
+asrd = "asrd.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+include = ["src/asrd/**"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/asrd"]

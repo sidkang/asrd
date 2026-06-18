@@ -4,23 +4,15 @@
 <plist version="1.0">
   <dict>
     <key>Label</key>
-    <string>com.sid.voxt-qwen3-asr</string>
+    <string>{label}</string>
 
     <key>ProgramArguments</key>
     <array>
-      <string>/Users/sid/.local/share/mise/venv/asr/bin/python</string>
-      <string>/Users/sid/Developer/qwen3-asr/qwen3_asr_server.py</string>
-      <string>--host</string>
-      <string>0.0.0.0</string>
-      <string>--port</string>
-      <string>5100</string>
-      <string>--unload-after-sec</string>
-      <string>30</string>
-      <string>--debug</string>
+{program_arguments}
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/sid/Developer/qwen3-asr</string>
+    <string>{working_directory}</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -32,10 +24,10 @@
     <integer>10</integer>
 
     <key>StandardOutPath</key>
-    <string>/Users/sid/Library/Logs/com.sid.voxt-qwen3-asr.out.log</string>
+    <string>{stdout_log}</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/sid/Library/Logs/com.sid.voxt-qwen3-asr.err.log</string>
+    <string>{stderr_log}</string>
 
     <key>EnvironmentVariables</key>
     <dict>

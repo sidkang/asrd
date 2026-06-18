@@ -2,3 +2,8 @@
 .venv/
 __pycache__/
 *.py[cod]
+AGENTS.md
+agents.md
+mise.toml
+.pytest_cache/
+.venv-name
