@@ -230,4 +230,4 @@ Expect several GB of memory use during active transcription. The 1.7B correction
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+This project is licensed under Apache-2.0, matching `mlx-qwen3-asr`. See [LICENSE](LICENSE).
