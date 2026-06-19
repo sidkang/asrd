@@ -148,6 +148,8 @@ HTTP_PREVIEW_SESSION_HEAD_SEC = 1.0
 HTTP_PREVIEW_SESSION_TAIL_SEC = 1.0
 HTTP_PREVIEW_SESSION_MATCH_RMS = 0.02
 HTTP_PREVIEW_SESSION_MATCH_TOLERANCE_SEC = 0.25
+HTTP_PREVIEW_SESSION_CACHE_MAX = 4
+HTTP_PREVIEW_SESSION_CACHE_TTL_SEC = 600.0
 TEXT_BOUNDARY_PUNCT = set("，。！？；：、,.!?;:（）()[]【】{}《》<>“”\"'‘’…—-·/\\|@#$%^&*_+=~`")
 ASR_CONTEXT_TERM_KEYS = {
     "hotwords",
@@ -227,6 +229,7 @@ class State:
     ws_correction_responses: dict[str, dict[str, Any]] = field(default_factory=dict)
     ws_session: Any | None = None
     http_realtime_session: Any | None = None
+    http_realtime_sessions: list[HttpRealtimeSession] = field(default_factory=list)
     http_preview_inflight: bool = False
     ws_executor: concurrent.futures.ThreadPoolExecutor | None = None
     active_ws_count: int = 0
@@ -433,6 +436,7 @@ def create_app(config: Config) -> FastAPI:
         idle_remaining = None
         if (correction_worker_alive or state.ws_session is not None) and idle_for is not None and config.unload_after_sec > 0:
             idle_remaining = max(0.0, config.unload_after_sec - idle_for)
+        http_latest_session = latest_http_session(state)
         return {
             "status": "ok",
             "model": config.model,
@@ -450,8 +454,9 @@ def create_app(config: Config) -> FastAPI:
             "rolling_correction_commit_span_sec": ROLLING_CORRECTION_COMMIT_SPAN_SEC,
             "final_catchup_max_window_sec": FINAL_CATCHUP_MAX_WINDOW_SEC,
             "realtime_final_wait_timeout_sec": REALTIME_FINAL_WAIT_TIMEOUT_SEC,
-            "http_cached_audio_sec": round(state.http_realtime_session.last_sample_count / ASR_SAMPLE_RATE, 3) if state.http_realtime_session else 0.0,
-            "http_cached_stable_until_sec": round(state.http_realtime_session.rolling_correction.stable_until_sec, 3) if state.http_realtime_session else 0.0,
+            "http_cached_sessions": len(state.http_realtime_sessions),
+            "http_cached_audio_sec": round(http_latest_session.last_sample_count / ASR_SAMPLE_RATE, 3) if http_latest_session else 0.0,
+            "http_cached_stable_until_sec": round(http_latest_session.rolling_correction.stable_until_sec, 3) if http_latest_session else 0.0,
             "active_ws_count": state.active_ws_count,
             "active_http_count": state.active_http_count,
             "busy": bool(state.http_realtime_lock and state.http_realtime_lock.locked()),
@@ -479,8 +484,9 @@ def create_app(config: Config) -> FastAPI:
 
         await websocket.accept()
         state.active_ws_count += 1
+        ws_session_id = f"ws_{uuid.uuid4().hex[:12]}"
         client = f"{websocket.client.host}:{websocket.client.port}" if websocket.client else "unknown"
-        print(f"Realtime WS connected client={client} active={state.active_ws_count}", flush=True)
+        print(f"Realtime WS connected session={ws_session_id} client={client} active={state.active_ws_count}", flush=True)
         preview_state: WsChunkPreviewState | None = None
         last_text = ""
         language = None
@@ -714,7 +720,7 @@ def create_app(config: Config) -> FastAPI:
                 event_type = event.get("type")
                 if event_type != "input_audio_buffer.append":
                     print(
-                        f"Realtime WS event client={client} type={event_type!r} action={action!r} "
+                        f"Realtime WS event session={ws_session_id} client={client} type={event_type!r} action={action!r} "
                         f"keys={list(event.keys())} raw={message[:500]!r}",
                         flush=True,
                     )
@@ -827,7 +833,7 @@ def create_app(config: Config) -> FastAPI:
                             flush=True,
                         )
                     print(
-                        f"Realtime WS session.update client={client} request_model={requested_model!r} "
+                        f"Realtime WS session.update session={ws_session_id} client={client} request_model={requested_model!r} "
                         f"selected_model={selected_model!r} language={language!r} "
                         f"context_terms={context_terms_count} prompt_chars={len(prompt)}",
                         flush=True,
@@ -963,18 +969,18 @@ def create_app(config: Config) -> FastAPI:
                 else:
                     await websocket_send_error(websocket, "unsupported_event", f"Unsupported event type: {event_type}")
         except WebSocketDisconnect:
-            print(f"Realtime WS disconnected client={client}", flush=True)
+            print(f"Realtime WS disconnected session={ws_session_id} client={client}", flush=True)
         except RuntimeError as exc:
             if "disconnect message" not in str(exc):
                 raise
-            print(f"Realtime WS disconnected client={client} reason=disconnect-message", flush=True)
+            print(f"Realtime WS disconnected session={ws_session_id} client={client} reason=disconnect-message", flush=True)
         finally:
             final_requested = True
             discard_preview_tasks()
             preserve_debug_ws_audio_once(protocol="aliyun-fun" if fun_task_id else "aliyun-qwen", final_text=last_text)
             state.active_ws_count = max(0, state.active_ws_count - 1)
             state.last_used_at = time.monotonic()
-            print(f"Realtime WS closed client={client} active={state.active_ws_count}", flush=True)
+            print(f"Realtime WS closed session={ws_session_id} client={client} active={state.active_ws_count}", flush=True)
 
     @app.post("/v1/audio/transcriptions")
     async def transcriptions(
@@ -990,6 +996,7 @@ def create_app(config: Config) -> FastAPI:
             raise HTTPException(status_code=503, detail="ASR runtime is not ready")
 
         request_model = require_non_empty_model(model)
+        request_id = f"http_{uuid.uuid4().hex[:12]}"
         is_preview = is_voxt_preview_upload(file.filename)
         state.active_http_count += 1
 
@@ -1013,7 +1020,7 @@ def create_app(config: Config) -> FastAPI:
                 preview_window_log = f"audio={audio_duration:.2f}s preview_window={CHUNK_PREVIEW_WINDOW_SEC:.2f}s preview_update={HTTP_CHUNK_PREVIEW_UPDATE_SEC:.2f}s "
             print(
                 "Transcription request "
-                f"kind={'preview' if is_preview else 'final'} filename={file.filename!r} bytes={size} "
+                f"request={request_id} kind={'preview' if is_preview else 'final'} filename={file.filename!r} bytes={size} "
                 f"{preview_window_log}"
                 f"request_model={request_model!r} selected_model={selected_model!r} "
                 f"language={language!r}->{lang!r} prompt_chars={len(prompt or '')} format={fmt!r}",
@@ -1211,6 +1218,50 @@ def update_http_session_audio(session: HttpRealtimeSession, full_audio: np.ndarr
     session.last_seen_at = time.monotonic()
 
 
+def latest_http_session(state: State) -> HttpRealtimeSession | None:
+    if state.http_realtime_sessions:
+        return max(state.http_realtime_sessions, key=lambda item: item.last_seen_at)
+    return state.http_realtime_session
+
+
+def sync_latest_http_session(state: State) -> None:
+    state.http_realtime_session = max(state.http_realtime_sessions, key=lambda item: item.last_seen_at) if state.http_realtime_sessions else None
+
+
+def prune_http_sessions(state: State) -> list[HttpRealtimeSession]:
+    now = time.monotonic()
+    removed: list[HttpRealtimeSession] = []
+    kept: list[HttpRealtimeSession] = []
+    for session in state.http_realtime_sessions:
+        if session.final_requested or (session.last_seen_at and now - session.last_seen_at > HTTP_PREVIEW_SESSION_CACHE_TTL_SEC):
+            removed.append(session)
+        else:
+            kept.append(session)
+    kept.sort(key=lambda item: item.last_seen_at, reverse=True)
+    while len(kept) > HTTP_PREVIEW_SESSION_CACHE_MAX:
+        removed.append(kept.pop())
+    state.http_realtime_sessions = kept
+    sync_latest_http_session(state)
+    return removed
+
+
+def add_http_session(state: State, session: HttpRealtimeSession) -> list[HttpRealtimeSession]:
+    state.http_realtime_sessions = [item for item in state.http_realtime_sessions if item.session_id != session.session_id]
+    state.http_realtime_sessions.append(session)
+    removed = prune_http_sessions(state)
+    sync_latest_http_session(state)
+    return removed
+
+
+def remove_http_session(state: State, session: HttpRealtimeSession | None) -> None:
+    if session is None:
+        return
+    state.http_realtime_sessions = [item for item in state.http_realtime_sessions if item.session_id != session.session_id]
+    if state.http_realtime_session is not None and state.http_realtime_session.session_id == session.session_id:
+        state.http_realtime_session = None
+    sync_latest_http_session(state)
+
+
 def http_session_reset_reason(
     session: HttpRealtimeSession | None,
     full_audio: np.ndarray,
@@ -1254,6 +1305,30 @@ def http_session_matches_audio(
     return http_session_reset_reason(session, full_audio, language=language, prompt=prompt) is None
 
 
+def find_matching_http_session(
+    state: State,
+    full_audio: np.ndarray,
+    *,
+    language: str | None,
+    prompt: str,
+) -> HttpRealtimeSession | None:
+    for session in sorted(state.http_realtime_sessions, key=lambda item: item.last_seen_at, reverse=True):
+        if http_session_matches_audio(session, full_audio, language=language, prompt=prompt):
+            return session
+    if http_session_matches_audio(state.http_realtime_session, full_audio, language=language, prompt=prompt):
+        return state.http_realtime_session
+    return None
+
+
+def find_http_session_by_id(state: State, session_id: str) -> HttpRealtimeSession | None:
+    for session in state.http_realtime_sessions:
+        if session.session_id == session_id:
+            return session
+    if state.http_realtime_session is not None and state.http_realtime_session.session_id == session_id:
+        return state.http_realtime_session
+    return None
+
+
 def http_session_merged_text(session: HttpRealtimeSession) -> str:
     total_sec = session.last_sample_count / ASR_SAMPLE_RATE if session.last_sample_count else 0.0
     correction = session.rolling_correction
@@ -1270,7 +1345,7 @@ def http_session_merged_text(session: HttpRealtimeSession) -> str:
 
 
 def http_cached_response_text(state: State) -> str:
-    session = state.http_realtime_session
+    session = latest_http_session(state)
     return session.last_response_text if session is not None else ""
 
 
@@ -1303,15 +1378,23 @@ async def http_realtime_preview_transcription(
     session_id = ""
     should_run_preview = False
     async with state.http_realtime_lock:
-        session = state.http_realtime_session
-        reset_reason = http_session_reset_reason(session, full_audio, language=language, prompt=prompt)
-        if reset_reason is not None:
-            await cancel_http_session_corrections(state, session, reason=f"http-preview-{reset_reason}")
+        removed_sessions = prune_http_sessions(state)
+        for removed in removed_sessions:
+            await cancel_http_session_corrections(state, removed, reason="http-preview-cache-evict")
+        session = find_matching_http_session(state, full_audio, language=language, prompt=prompt)
+        if session is None:
+            reset_reason = "new_session"
             session = HttpRealtimeSession(language=language, prompt=prompt)
-            state.http_realtime_session = session
+            update_http_session_audio(session, full_audio)
+            removed_sessions = add_http_session(state, session)
+            for removed in removed_sessions:
+                if removed.session_id != session.session_id:
+                    await cancel_http_session_corrections(state, removed, reason="http-preview-cache-evict")
             print(f"HTTP realtime preview session reset reason={reset_reason} session={session.session_id}", flush=True)
+        else:
+            update_http_session_audio(session, full_audio)
+            sync_latest_http_session(state)
 
-        update_http_session_audio(session, full_audio)
         await ws_update_rolling_correction(
             state,
             config,
@@ -1370,7 +1453,7 @@ async def http_realtime_preview_transcription(
         preview_error = exc
 
     async with state.http_realtime_lock:
-        session = state.http_realtime_session
+        session = find_http_session_by_id(state, session_id)
         if session is None or session.session_id != session_id:
             state.http_preview_inflight = False
             text = http_cached_response_text(state)
@@ -1410,11 +1493,12 @@ async def http_realtime_final_transcription(
     total_sec = full_audio.size / ASR_SAMPLE_RATE if full_audio.size else 0.0
 
     async with state.http_realtime_lock:
-        session = state.http_realtime_session
-        matched = http_session_matches_audio(session, full_audio, language=language, prompt=prompt)
+        removed_sessions = prune_http_sessions(state)
+        for removed in removed_sessions:
+            await cancel_http_session_corrections(state, removed, reason="http-final-cache-evict")
+        session = find_matching_http_session(state, full_audio, language=language, prompt=prompt)
+        matched = session is not None
         if not matched:
-            await cancel_http_session_corrections(state, session, reason="http-final-new-session")
-            state.http_realtime_session = None
             state.http_preview_inflight = False
 
     if not matched:
@@ -1427,7 +1511,7 @@ async def http_realtime_final_transcription(
         )
 
     async with state.http_realtime_lock:
-        session = state.http_realtime_session
+        session = find_matching_http_session(state, full_audio, language=language, prompt=prompt)
         if session is None or not http_session_matches_audio(session, full_audio, language=language, prompt=prompt):
             return await http_full_final_transcription(
                 state,
@@ -1450,6 +1534,7 @@ async def http_realtime_final_transcription(
         text = http_session_merged_text(session)
         session.last_response_text = text
         state.http_preview_inflight = False
+        remove_http_session(state, session)
         state.last_used_at = time.monotonic()
         print(
             f"HTTP realtime final strategy=rolling-final-tail matched_session=True audio={total_sec:.2f}s "
@@ -2011,6 +2096,7 @@ def unload_ws_session_sync(state: State, reason: str) -> None:
         print(f"Unloading realtime ASR model after {reason}", flush=True)
         state.ws_session = None
     state.http_realtime_session = None
+    state.http_realtime_sessions.clear()
     state.http_preview_inflight = False
     clear_mlx_cache()
 

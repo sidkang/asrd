@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2 - 2026-06-19
+
+- Add request/session ids to operational logs.
+- Keep multiple HTTP preview correction sessions in cache for better final matching.
+- Add `asrd service show`.
+- Add `asrd service uninstall --purge-logs`.
+
 ## 0.2.1 - 2026-06-19
 
 - Remove ASR-specific environment-variable configuration; use CLI options for service configuration.

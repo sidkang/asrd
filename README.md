@@ -104,6 +104,7 @@ Manage it:
 
 ```bash
 asrd service status
+asrd service show
 asrd service restart
 asrd service logs
 asrd service uninstall
@@ -130,6 +131,12 @@ asrd service install \
 ```
 
 For LAN access, pass `--host 0.0.0.0` and use a non-default API key.
+
+Remove logs and debug artifacts during uninstall if needed:
+
+```bash
+asrd service uninstall --purge-logs
+```
 
 ## Configuration
 
@@ -218,9 +225,9 @@ For LAN use, replace `127.0.0.1` with the server machine IP.
 
 - HTTP/WS preview uses the 0.6B model; final/correction uses the 1.7B model.
 - VoxT HTTP preview uploads are detected by `voxt-openai-preview-*.wav`.
-- Matching HTTP final uploads reuse the preview correction cache; plain uploads use full one-shot transcription.
+- Matching HTTP final uploads reuse a small preview correction cache; plain uploads use full one-shot transcription.
 - Request-provided language/context/hotwords are passed through; no defaults are injected.
-- Logs include latency, speed, and RTF summaries.
+- Logs include request/session ids plus latency, speed, and RTF summaries.
 
 ## Resource usage
 

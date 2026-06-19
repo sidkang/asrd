@@ -59,6 +59,39 @@ def test_context_terms_respect_count_and_character_limits():
     assert sum(len(term) + 1 for term in limited) <= server.ASR_CONTEXT_MAX_CHARS
 
 
+def test_http_preview_session_cache_matches_multiple_sessions():
+    state = server.State()
+    audio_a = np.ones(32_000, dtype=np.float32) * 0.1
+    audio_b = np.ones(32_000, dtype=np.float32) * 0.2
+    session_a = server.HttpRealtimeSession(language="Chinese", prompt="a")
+    session_b = server.HttpRealtimeSession(language="English", prompt="b")
+    server.update_http_session_audio(session_a, audio_a)
+    server.update_http_session_audio(session_b, audio_b)
+
+    server.add_http_session(state, session_a)
+    server.add_http_session(state, session_b)
+
+    assert server.find_matching_http_session(state, audio_a, language="Chinese", prompt="a") is session_a
+    assert server.find_matching_http_session(state, audio_b, language="English", prompt="b") is session_b
+    assert server.find_matching_http_session(state, audio_b, language="Chinese", prompt="a") is None
+
+
+def test_http_preview_session_cache_evicts_oldest():
+    state = server.State()
+    sessions: list[server.HttpRealtimeSession] = []
+    base_seen_at = server.time.monotonic()
+    for index in range(server.HTTP_PREVIEW_SESSION_CACHE_MAX + 1):
+        session = server.HttpRealtimeSession(language="Chinese", prompt=str(index))
+        server.update_http_session_audio(session, np.ones(160, dtype=np.float32) * index)
+        session.last_seen_at = base_seen_at + index
+        sessions.append(session)
+        server.add_http_session(state, session)
+
+    assert len(state.http_realtime_sessions) == server.HTTP_PREVIEW_SESSION_CACHE_MAX
+    assert sessions[0] not in state.http_realtime_sessions
+    assert sessions[-1] in state.http_realtime_sessions
+
+
 def test_require_non_empty_model_rejects_blank():
     assert server.require_non_empty_model(" model ") == "model"
 

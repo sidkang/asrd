@@ -1,6 +1,6 @@
 [project]
 name = "asrd"
-version = "0.2.1"
+version = "0.2.2"
 description = "Local OpenAI-compatible ASR daemon powered by MLX/Qwen3-ASR"
 license = "Apache-2.0"
 requires-python = ">=3.10"

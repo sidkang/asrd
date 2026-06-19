@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,7 @@ LOG_DIR = Path.home() / "Library" / "Logs"
 TARGET_PLIST = LAUNCH_AGENTS_DIR / f"{LABEL}.plist"
 STDOUT_LOG = LOG_DIR / f"{LABEL}.out.log"
 STDERR_LOG = LOG_DIR / f"{LABEL}.err.log"
+DEBUG_DIR = LOG_DIR / f"{LABEL}.debug"
 LEGACY_PLIST = LAUNCH_AGENTS_DIR / f"{LEGACY_LABEL}.plist"
 
 
@@ -119,13 +121,73 @@ def stop(_: argparse.Namespace) -> int:
 
 
 def uninstall(_: argparse.Namespace) -> int:
+    args = _
     stop(argparse.Namespace())
     if TARGET_PLIST.exists():
         print("+ rm", TARGET_PLIST)
         TARGET_PLIST.unlink()
-    print("Uninstalled launch agent. Logs were kept:")
-    print(f"  {STDOUT_LOG}")
-    print(f"  {STDERR_LOG}")
+    if getattr(args, "purge_logs", False):
+        for path in (STDOUT_LOG, STDERR_LOG):
+            if path.exists():
+                print("+ rm", path)
+                path.unlink()
+        if DEBUG_DIR.exists():
+            print("+ rm -r", DEBUG_DIR)
+            shutil.rmtree(DEBUG_DIR)
+        print("Uninstalled launch agent and purged logs.")
+    else:
+        print("Uninstalled launch agent. Logs were kept:")
+        print(f"  {STDOUT_LOG}")
+        print(f"  {STDERR_LOG}")
+        print(f"  {DEBUG_DIR}")
+    return 0
+
+
+def plist_service_config() -> dict[str, str | bool | None]:
+    if not TARGET_PLIST.exists():
+        return {"installed": False}
+    data = plistlib.loads(TARGET_PLIST.read_bytes())
+    argv = list(data.get("ProgramArguments") or [])
+
+    def value(flag: str) -> str | None:
+        try:
+            return str(argv[argv.index(flag) + 1])
+        except (ValueError, IndexError):
+            return None
+
+    return {
+        "installed": True,
+        "label": str(data.get("Label") or LABEL),
+        "command": str(argv[0]) if argv else None,
+        "host": value("--host"),
+        "port": value("--port"),
+        "api_key": "configured" if value("--api-key") else "not set",
+        "unload_after_sec": value("--unload-after-sec"),
+        "debug": "--debug" in argv,
+        "debug_dir": value("--debug-dir") or str(DEBUG_DIR),
+        "working_directory": str(data.get("WorkingDirectory") or ""),
+        "stdout": str(data.get("StandardOutPath") or STDOUT_LOG),
+        "stderr": str(data.get("StandardErrorPath") or STDERR_LOG),
+    }
+
+
+def show(_: argparse.Namespace) -> int:
+    config = plist_service_config()
+    if not config.get("installed"):
+        print(f"Not installed: {TARGET_PLIST}")
+        return 1
+    print(f"Label:             {config['label']}")
+    print(f"Plist:             {TARGET_PLIST}")
+    print(f"Command:           {config['command']}")
+    print(f"Host:              {config['host']}")
+    print(f"Port:              {config['port']}")
+    print(f"API key:           {config['api_key']}")
+    print(f"Unload after sec:  {config['unload_after_sec']}")
+    print(f"Debug:             {'on' if config['debug'] else 'off'}")
+    print(f"Debug dir:         {config['debug_dir']}")
+    print(f"Working directory: {config['working_directory']}")
+    print(f"Stdout:            {config['stdout']}")
+    print(f"Stderr:            {config['stderr']}")
     return 0
 
 
@@ -174,8 +236,11 @@ def main(argv: list[str] | None = None) -> int:
     restart_parser.set_defaults(func=restart)
 
     sub.add_parser("status", help="Print launchctl status").set_defaults(func=status)
+    sub.add_parser("show", help="Show installed LaunchAgent configuration").set_defaults(func=show)
     sub.add_parser("stop", help="Stop the LaunchAgent").set_defaults(func=stop)
-    sub.add_parser("uninstall", help="Stop and remove the LaunchAgent").set_defaults(func=uninstall)
+    uninstall_parser = sub.add_parser("uninstall", help="Stop and remove the LaunchAgent")
+    uninstall_parser.add_argument("--purge-logs", action="store_true", help="Also remove stdout/stderr logs and debug artifacts.")
+    uninstall_parser.set_defaults(func=uninstall)
     logs_parser = sub.add_parser("logs", help="Print log paths, or follow logs with --follow")
     logs_parser.add_argument("-f", "--follow", action="store_true")
     logs_parser.set_defaults(func=logs)
