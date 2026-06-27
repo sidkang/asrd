@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-14-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Run tests
+        run: uv run --group dev pytest -q
+      - name: Syntax check
+        run: |
+          for f in $(find src/asrd tests examples -name '*.py' -print); do
+            uv run python -m ast "$f" >/dev/null
+          done
+      - name: Build package
+        run: uv build
